@@ -1,0 +1,70 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hermes-yandex-mail"
+version = "0.1.0"
+description = "Yandex Mail plugin for Hermes Agent: search, read, flag, move, and delete messages over IMAP."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11,<3.14"
+authors = [{ name = "Roman Akinfeev" }]
+keywords = ["hermes", "hermes-agent", "plugin", "yandex", "mail", "email", "imap"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Email",
+]
+# No runtime dependencies: IMAP and MIME parsing come from the standard library.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4", "pytest-cov>=4.1", "ruff>=0.6", "radon>=6.0", "pyyaml>=6.0"]
+
+[project.urls]
+Homepage = "https://github.com/akinfold/hermes-yandex-mail"
+Repository = "https://github.com/akinfold/hermes-yandex-mail"
+Issues = "https://github.com/akinfold/hermes-yandex-mail/issues"
+
+# Value is the MODULE (Hermes does getattr(module, "register")), not module:register.
+[project.entry-points."hermes_agent.plugins"]
+yandex_mail = "hermes_yandex_mail"
+
+[tool.hatch.build.targets.wheel]
+packages = ["hermes_yandex_mail"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"hermes_yandex_mail/plugin.yaml" = "hermes_yandex_mail/plugin.yaml"
+"hermes_yandex_mail/py.typed" = "hermes_yandex_mail/py.typed"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "hermes_yandex_mail",
+    "tests",
+    "README.md",
+    "LICENSE",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["e2e: live tests that hit a real Yandex mailbox over IMAP (deselected by default)."]
+addopts = "-m 'not e2e'"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# The project root, so `hermes_yandex_mail` resolves as first-party.
+src = ["."]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "C4", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+
+[tool.ruff.format]
+quote-style = "double"

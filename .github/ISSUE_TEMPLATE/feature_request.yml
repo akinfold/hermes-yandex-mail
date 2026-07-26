@@ -1,0 +1,32 @@
+name: Feature request
+description: Suggest a capability or improvement
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The task you want the agent to handle, and what stops it today.
+      placeholder: I want the agent to file every invoice into a folder, but ...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: A new tool, a new argument, a config option — whatever you have in mind.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: imap
+    attributes:
+      label: Feasibility
+      description: >
+        Yandex Mail has no public REST API; this plugin speaks IMAP, which reads and
+        organises an existing mailbox but cannot send mail (that would be SMTP).
+      options:
+        - label: I have checked that IMAP can express this (or I am not sure — please advise)

@@ -1,0 +1,71 @@
+name: Bug report
+description: Report a problem with the plugin
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Please fill in the details below.
+        Do **not** paste your Yandex login, app password, or any message contents
+        you would not publish.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+      placeholder: When I ask the agent to move a message to another folder, ...
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Install the plugin with ...
+        2. Set plugins.enabled: [yandex_mail]
+        3. Ask the agent to ...
+    validations:
+      required: true
+  - type: textarea
+    id: tool-output
+    attributes:
+      label: Tool output or error
+      description: The JSON the tool returned, or the error from the Hermes log. Redact anything private.
+      render: text
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: hermes-version
+    attributes:
+      label: Hermes Agent version
+      placeholder: "0.19.0"
+    validations:
+      required: true
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      placeholder: "3.12"
+  - type: input
+    id: actions
+    attributes:
+      label: YANDEX_MAIL_ACTIONS
+      description: The value you configured, if any (this decides which tools exist).
+      placeholder: "read,write"
+  - type: input
+    id: folders
+    attributes:
+      label: YANDEX_MAIL_FOLDERS
+      description: The folder allow-list you configured, if any.
+      placeholder: "INBOX,Sent"
+  - type: checkboxes
+    id: imap-enabled
+    attributes:
+      label: Account setup
+      options:
+        - label: IMAP is enabled for this mailbox and the app password has the Mail scope

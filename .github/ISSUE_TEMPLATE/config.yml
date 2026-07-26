@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Hermes Agent documentation
+    url: https://hermes-agent.nousresearch.com/docs/
+    about: How Hermes Agent, plugins, and toolsets work.
+  - name: Enable IMAP in Yandex Mail
+    url: https://mail.yandex.ru/#setup/client
+    about: "\"Authentication failed\" is almost always this: IMAP must be switched on for the mailbox."
+  - name: Yandex app passwords
+    url: https://id.yandex.ru/security/app-passwords
+    about: Create the app password with the Mail scope (an account password will not work).
+  - name: Yandex IMAP documentation
+    url: https://yandex.ru/support/mail/mail-clients/others.html
+    about: Server names, ports, and the settings Yandex expects from mail clients.
