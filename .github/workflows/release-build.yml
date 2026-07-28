@@ -18,8 +18,8 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m pip install build
@@ -43,7 +43,7 @@ jobs:
           set -euo pipefail
           python -m pip install dist/*.whl
           python -c "import hermes_yandex_mail as p; assert callable(p.register); print('OK', p.__version__)"
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: release-artifacts
           path: dist/*
