@@ -9,6 +9,7 @@ every command so tests can assert on the wire traffic.
 from __future__ import annotations
 
 import imaplib
+import re
 from typing import Any
 
 import pytest
@@ -141,6 +142,21 @@ class FakeIMAP:
     def uid(self, command: str, *args: Any) -> tuple[str, list]:
         self.calls.append(("uid", command.upper(), *args))
         if command.upper() == "FETCH":
+            if "BODYSTRUCTURE" in args[1]:
+                return self.responses.get(
+                    "STRUCTURE",
+                    (
+                        "OK",
+                        [
+                            (
+                                f'1 (UID {args[0]} BODYSTRUCTURE ("TEXT" "PLAIN" '
+                                '("CHARSET" "UTF-8") NIL NIL "8BIT" 1024 1))'
+                            ).encode()
+                        ],
+                    ),
+                )
+            if re.search(r"BODY\.PEEK\[[1-9]", args[1]):
+                return self._part_reply(args)
             reply = self._fetch_reply(args)
             if reply is not None:
                 return reply
@@ -173,6 +189,20 @@ class FakeIMAP:
             b"%d (UID %s)" % (index + 1, uid.encode())
             for index, uid in enumerate(requested)
             if uid in self.existing_uids
+        ]
+
+    def _part_reply(self, args: tuple[Any, ...]) -> tuple[str, list]:
+        reply = self._reply("FETCH")
+        raw = next((item[1] for item in reply[1] if isinstance(item, tuple)), b"")
+        body = raw.partition(b"\r\n\r\n")[2]
+        match = re.search(r"BODY\.PEEK\[([\d.]+)\]<(\d+)\.(\d+)>", args[1])
+        assert match is not None
+        part_id, start_text, size_text = match.groups()
+        start, size = int(start_text), int(size_text)
+        part = body[start : start + size]
+        return "OK", [
+            (f"1 (UID {args[0]} BODY[{part_id}]<{start}> {{{len(part)}}}".encode(), part),
+            b")",
         ]
 
     def append(self, mailbox: Any, flags: Any, date_time: Any, message: bytes) -> tuple[str, list]:

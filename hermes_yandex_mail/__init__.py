@@ -45,6 +45,13 @@ _TOOLS: tuple[tuple[str, dict, Any, str, str], ...] = (
         "📧",
     ),
     (
+        "read_attachment",
+        tool.ATTACHMENT_SCHEMA,
+        tool.handle_read_attachment,
+        "Read one attachment in bounded pages of decoded bytes.",
+        "📎",
+    ),
+    (
         "mark_message",
         tool.MARK_SCHEMA,
         tool.handle_mark,

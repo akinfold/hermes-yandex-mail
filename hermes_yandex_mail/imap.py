@@ -32,6 +32,7 @@ from types import TracebackType
 
 from . import imap_utf7
 from .message import addresses, decode_header_value, header_date_iso, parse_message_bytes
+from .mime import MimePart, flatten_parts, response_fields
 
 __all__ = [
     "DEFAULT_FOLDER",
@@ -811,6 +812,42 @@ class YandexIMAPClient:
         return None
 
     # -- reading ------------------------------------------------------------
+
+    def message_parts(self, folder: str, uid: str) -> list[MimePart]:
+        """Read MIME metadata without fetching any text or attachment payload."""
+        self._select(self.check_folder(folder), readonly=True)
+        data = self._uid("FETCH structure", "FETCH", uid, "(UID BODYSTRUCTURE)")
+        try:
+            structure = response_fields(data, uid).get("BODYSTRUCTURE")
+            if not isinstance(structure, list):
+                raise ValueError("Server did not return BODYSTRUCTURE.")
+            return flatten_parts(structure)
+        except (ValueError, TypeError, IndexError) as exc:
+            raise MailError(f"Cannot parse MIME structure: {exc}") from exc
+
+    def iter_part(self, folder: str, uid: str, part_id: str) -> Iterator[bytes]:
+        """Stream one encoded MIME section in bounded, non-mutating requests."""
+        if not re.fullmatch(r"[1-9][0-9]*(?:\.[1-9][0-9]*)*", part_id):
+            raise MailError("Invalid MIME part_id.")
+        self._select(self.check_folder(folder), readonly=True)
+        offset, count = 0, 65536
+        while True:
+            data = self._uid(
+                "FETCH part", "FETCH", uid, f"(UID BODY.PEEK[{part_id}]<{offset}.{count}>)"
+            )
+            try:
+                fields = response_fields(data, uid, literal_bytes=True)
+            except (ValueError, TypeError, IndexError) as exc:
+                raise MailError(f"Cannot parse MIME part response: {exc}") from exc
+            raw = fields.get(f"BODY[{part_id}]<{offset}>")
+            if not isinstance(raw, bytes):
+                raise MailError("Server did not return the requested MIME part range.")
+            if len(raw) > count:
+                raise MailError("Server exceeded the MIME chunk size limit.")
+            yield raw
+            if len(raw) < count:
+                return
+            offset += len(raw)
 
     def search(
         self, folder: str, query: SearchQuery, limit: int = 25, offset: int = 0

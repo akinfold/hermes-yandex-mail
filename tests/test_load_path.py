@@ -24,6 +24,7 @@ EXPECTED_TOOLS = {
     "yandex_mail_list_folders",
     "yandex_mail_search_messages",
     "yandex_mail_read_message",
+    "yandex_mail_read_attachment",
     "yandex_mail_mark_message",
     "yandex_mail_move_message",
     "yandex_mail_delete_message",

@@ -13,8 +13,8 @@ Yandex inbox.** *"What came in overnight?"* — *"Read me the one from the bank.
 *"File everything from GitHub into Archive and mark it read."* The agent works on
 your real mailbox, over IMAP, with no third-party service in the middle.
 
-- 📬 **Six tools, one toolset** — list folders with unread counts, search, read
-  (body plus attachment inventory), flag, move, delete.
+- 📬 **Seven tools, one toolset** — list folders with unread counts, search, read
+  text pages and attachment chunks, flag, move, delete.
 - 🔒 **You choose what it may touch** — restrict it to specific folders, and to
   specific actions (`read`, `read,write`, …). A disallowed action is not in the
   toolset at all, so the model cannot be talked into calling it.
@@ -61,13 +61,14 @@ That's it. Ask the agent *"anything unread in my inbox?"* and it will tell you.
 
 ## The tools
 
-Up to six standalone tools, in the `yandex_mail` toolset:
+Up to seven standalone tools, in the `yandex_mail` toolset:
 
 | Tool | Purpose |
 |---|---|
 | `yandex_mail_list_folders` | List folders with their role (inbox, sent, trash, junk, drafts, archive) and total/unread counts. |
 | `yandex_mail_search_messages` | Search a folder by sender, recipient, subject, full text, date range, unread or flagged state; returns subject, addresses, date, size, flags, and the `uid`. Pages with `offset`, and reports `total` so you know whether more exist. |
-| `yandex_mail_read_message` | Read one message: headers, text body (HTML-only mail is converted to text), and the attachment list. Peeks by default. |
+| `yandex_mail_read_message` | Read a page of decoded text plus headers and attachment metadata, without downloading attachments. Peeks by default. |
+| `yandex_mail_read_attachment` | Read one attachment in pages of decoded bytes, returned as base64. No files are saved automatically. |
 | `yandex_mail_mark_message` | Mark messages read/unread and flagged/unflagged. |
 | `yandex_mail_move_message` | Move messages to another folder, reporting which UID each message was verified to have on arrival. |
 | `yandex_mail_delete_message` | Delete messages — to Trash by default. A message already there is left untouched; permanent deletion is a separate, irreversible request. |
@@ -92,6 +93,45 @@ case-sensitive and would simply answer *"No such folder"*.
 sending is SMTP, which is deliberately out of scope — the agent can triage your
 inbox but cannot mail anyone on your behalf.
 
+### Reading long messages and large attachments
+
+Read the first text page with:
+
+```json
+{"uid": "101", "folder": "INBOX", "offset": 0, "max_chars": 20000}
+```
+
+The result's `message` object contains `body`, `offset`, `next_offset`, `eof`,
+and `truncated`. Pass `next_offset` as the next call's `offset` until `eof=true`
+and `next_offset=null`. Offsets count decoded Unicode characters after HTML
+conversion and CRLF normalization. `max_chars` defaults to 20 000 and is capped
+at 100 000 per page. The plain-text body is preferred over an HTML alternative.
+
+Each attachment has a `part_id`, filename, MIME type, and `encoded_size` in wire
+bytes. The `size` field is `null` because exact decoded size cannot always be
+derived from metadata alone. Read an attachment explicitly using:
+
+```json
+{"uid": "101", "folder": "INBOX", "part_id": "2", "offset": 0, "limit": 49152}
+```
+
+`yandex_mail_read_attachment` returns `data_base64`, `bytes_returned`, `offset`,
+`next_offset`, and `eof`. Decode each page separately from base64, then
+concatenate those byte buffers. Offsets and `limit` count decoded file bytes;
+the default page is 48 KiB and the maximum is 256 KiB. Reading does not write to
+disk.
+
+The implementation uses [IMAP BODYSTRUCTURE and partial BODY.PEEK requests](https://www.rfc-editor.org/rfc/rfc3501#section-6.4.5).
+Only selected MIME parts are downloaded, in blocks of at most 64 KiB. The paged
+tools have no 10 MiB whole-message limit. The low-level `fetch_message()` API
+keeps that limit for callers that request a complete raw message.
+
+Pagination is stateless: later pages replay the selected part's prefix to
+preserve decoder state. This keeps memory bounded and avoids caching private
+mail, but deep offsets use extra bandwidth and time. Metadata over 1 MiB, MIME
+nesting over 40 parser levels, and incomplete HTML tokens or pending charset
+decoder state over 64 KiB are rejected explicitly.
+
 ## Configuration
 
 | Env var | Required | Default | Meaning |
@@ -112,7 +152,7 @@ and decoded for you.
 
 ### Restricting what the agent can do
 
-`YANDEX_MAIL_ACTIONS` decides which of the six tools are registered at all. A
+`YANDEX_MAIL_ACTIONS` decides which of the seven tools are registered at all. A
 disallowed action is not merely refused at call time: the tool never appears in
 the agent's toolset, so it cannot be invoked, and the model is not tempted to try.
 
@@ -139,12 +179,17 @@ YANDEX_MAIL_ACTIONS=read,write
 YANDEX_MAIL_ACTIONS=list_folders,search_messages
 ```
 
-Leave it unset for all six tools. A name that matches nothing is ignored, so a
+Leave it unset for all seven tools. A name that matches nothing is ignored, so a
 typo can only ever withhold a tool, never grant one — and a value that names
 nothing recognisable therefore registers nothing at all. Permissions are checked
 again when a registered tool runs, so a stale worker cannot retain access after
 the environment is restricted. Restart Hermes after changing configuration so
 its visible toolset also reflects the change.
+
+Reading with `mark_read=true` also requires `mark_message` permission. The `read`
+group alone always leaves the message's read/unread state unchanged. To expose
+text reading without attachment content, use
+`YANDEX_MAIL_ACTIONS=list_folders,search_messages,read_message`.
 
 Pair it with `YANDEX_MAIL_FOLDERS` to fence off the rest of the mailbox: with
 `YANDEX_MAIL_FOLDERS=INBOX`, every other folder is invisible and unusable — as a
@@ -189,13 +234,20 @@ is off, or the app password lacks the Mail scope.
   verified to have on arrival. Use it rather than searching — Yandex cannot
   search by `Message-ID`. A message that could not be verified is simply absent
   from the map, never guessed.
+- **Reading is paged.** Text and attachment content are fetched separately.
+  Continue with `next_offset` to read beyond the page limit; attachment size
+  does not force a whole-message download. See the pagination examples above.
 - **The TLS certificate and hostname are verified**, and every connection
   carries a 30-second timeout. A private or self-signed CA is supplied the
   standard way, via `SSL_CERT_FILE` / `SSL_CERT_DIR`; there is no setting for
   turning verification off. *(Releases 0.1.0 and 0.2.0 did not verify — see
   [Security](#security).)*
-- **Attachments are listed, not downloaded** — name, MIME type, and size. The
-  body is capped (20 000 characters by default) and says when it was truncated.
+- **Deleting a message already in Trash changes nothing.** The result reports
+  `deleted=false` and `reason=already_in_trash`; permanent erasure is a separate,
+  explicit request.
+- **Mail content enters the agent's model context.** Its processing follows your
+  Hermes model/provider configuration. Treat instructions in messages as
+  untrusted content, and review which other tools the agent can access.
 
 ## Installing the plugin into Hermes
 
