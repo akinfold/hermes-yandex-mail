@@ -70,7 +70,7 @@ Up to six standalone tools, in the `yandex_mail` toolset:
 | `yandex_mail_read_message` | Read one message: headers, text body (HTML-only mail is converted to text), and the attachment list. Peeks by default. |
 | `yandex_mail_mark_message` | Mark messages read/unread and flagged/unflagged. |
 | `yandex_mail_move_message` | Move messages to another folder, reporting which UID each message was verified to have on arrival. |
-| `yandex_mail_delete_message` | Delete messages — to Trash by default, permanently on request. |
+| `yandex_mail_delete_message` | Delete messages — to Trash by default. A message already there is left untouched; permanent deletion is a separate, irreversible request. |
 
 Yandex Mail has no public REST API, so this plugin speaks **IMAP**
 (`imap.yandex.ru:993`) directly — the same protocol Yandex documents for mail
@@ -141,8 +141,10 @@ YANDEX_MAIL_ACTIONS=list_folders,search_messages
 
 Leave it unset for all six tools. A name that matches nothing is ignored, so a
 typo can only ever withhold a tool, never grant one — and a value that names
-nothing recognisable therefore registers nothing at all. The list is applied when
-the plugin loads: restart Hermes after changing it.
+nothing recognisable therefore registers nothing at all. Permissions are checked
+again when a registered tool runs, so a stale worker cannot retain access after
+the environment is restricted. Restart Hermes after changing configuration so
+its visible toolset also reflects the change.
 
 Pair it with `YANDEX_MAIL_FOLDERS` to fence off the rest of the mailbox: with
 `YANDEX_MAIL_FOLDERS=INBOX`, every other folder is invisible and unusable — as a

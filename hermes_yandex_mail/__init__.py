@@ -82,7 +82,7 @@ def register(ctx: Any) -> None:
             name=schema["name"],
             toolset=tool.TOOLSET,
             schema=schema,
-            handler=handler,
+            handler=tool.with_action_guard(action, handler),
             check_fn=credentials_present,
             requires_env=_REQUIRES_ENV,
             description=description,
