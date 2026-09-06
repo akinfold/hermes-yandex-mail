@@ -24,6 +24,7 @@ from __future__ import annotations
 import contextlib
 import imaplib
 import re
+import ssl
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -51,11 +52,36 @@ DEFAULT_HOST = "imap.yandex.ru"
 DEFAULT_PORT = 993
 DEFAULT_FOLDER = "INBOX"
 
+#: Seconds to wait on the connection and on every subsequent socket operation.
+#: Without it a stalled server hangs the tool call — and therefore the agent —
+#: forever, since imaplib blocks indefinitely by default.
+DEFAULT_TIMEOUT = 30
+
 #: Yandex hands out several interchangeable domains for the same mailbox.
 _YANDEX_DOMAINS = frozenset(
     {"ya.ru", "yandex.ru", "yandex.com", "yandex.by", "yandex.kz", "narod.ru"}
 )
 _CANONICAL_DOMAIN = "yandex.ru"
+
+
+def _default_connection(host: str, port: int) -> imaplib.IMAP4:
+    """Open a TLS connection that actually verifies who it is talking to.
+
+    ``imaplib.IMAP4_SSL`` with no ``ssl_context`` falls back to
+    ``ssl._create_stdlib_context()``, which sets ``verify_mode=CERT_NONE`` and
+    ``check_hostname=False`` — the connection is encrypted but unauthenticated,
+    so anyone able to intercept it can present their own certificate and read
+    the app password and every message. ``ssl.create_default_context()``
+    verifies the chain and the hostname.
+
+    A private or self-signed CA is supplied the standard way, through the
+    ``SSL_CERT_FILE`` / ``SSL_CERT_DIR`` environment variables that
+    ``create_default_context`` already honours; there is deliberately no
+    setting here for turning verification off.
+    """
+    return imaplib.IMAP4_SSL(
+        host, port, ssl_context=ssl.create_default_context(), timeout=DEFAULT_TIMEOUT
+    )
 
 
 class MailError(RuntimeError):
@@ -427,7 +453,7 @@ class YandexIMAPClient:
         self._host = host
         self._port = port
         self._allowed = [f.strip() for f in allowed_folders if f.strip()]
-        self._factory = connection_factory or (lambda h, p: imaplib.IMAP4_SSL(h, p))
+        self._factory = connection_factory or _default_connection
         self._conn: imaplib.IMAP4 | None = None
         self._caps: frozenset[str] = frozenset()
         self._selected: tuple[str, bool] | None = None

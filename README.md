@@ -187,6 +187,11 @@ is off, or the app password lacks the Mail scope.
   verified to have on arrival. Use it rather than searching — Yandex cannot
   search by `Message-ID`. A message that could not be verified is simply absent
   from the map, never guessed.
+- **The TLS certificate and hostname are verified**, and every connection
+  carries a 30-second timeout. A private or self-signed CA is supplied the
+  standard way, via `SSL_CERT_FILE` / `SSL_CERT_DIR`; there is no setting for
+  turning verification off. *(Releases 0.1.0 and 0.2.0 did not verify — see
+  [Security](#security).)*
 - **Attachments are listed, not downloaded** — name, MIME type, and size. The
   body is capped (20 000 characters by default) and says when it was truncated.
 
@@ -254,6 +259,29 @@ Part of a family of Yandex plugins for Hermes Agent:
 - [hermes-yandex-disk](https://github.com/akinfold/hermes-yandex-disk) — browse, read, write, and share files on Yandex Disk (REST API).
 - [hermes-yandex-calendar](https://github.com/akinfold/hermes-yandex-calendar) — list, create, update, respond to, move, and delete Yandex Calendar events (CalDAV).
 - [hermes-yandex-search-api](https://github.com/akinfold/hermes-yandex-search-api) — Yandex web search backend and generative, cited answers for Hermes (Yandex Search API).
+
+## Security
+
+**0.1.0 and 0.2.0 connected without verifying the server's TLS certificate.**
+`imaplib.IMAP4_SSL` with no explicit `ssl_context` falls back to
+`ssl._create_stdlib_context()`, which sets `verify_mode=CERT_NONE` and
+`check_hostname=False`: the connection was encrypted but unauthenticated, so
+anyone positioned to intercept it — a hostile Wi-Fi network, a spoofed DNS
+answer, an intercepting proxy — could present their own certificate and read
+the app password and every message. **0.2.1 fixes this; upgrade.**
+
+```bash
+pip install --upgrade hermes-yandex-mail
+```
+
+If you ran an earlier version over a network you do not control, revoke the app
+password at <https://id.yandex.ru/security/app-passwords> and issue a new one.
+
+Found with thanks by [@ukko](https://github.com/ukko) in
+[#2](https://github.com/akinfold/hermes-yandex-mail/pull/2).
+
+Please report security issues privately rather than as a public issue — see
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Contributing
 

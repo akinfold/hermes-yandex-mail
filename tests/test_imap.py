@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import imaplib
+import ssl
 
 import pytest
 
 from hermes_yandex_mail.imap import (
     _SPECIAL_NAMES,
+    DEFAULT_TIMEOUT,
     Folder,
     MailError,
     MessageSummary,
@@ -952,3 +954,35 @@ def test_move_refuses_a_destination_the_allow_list_forbids(fake_imap):
         client.move("INBOX", ["8"], "Spam")
     for destructive in ("MOVE", "COPY", "STORE", "EXPUNGE"):
         assert destructive not in fake_imap.command_names()
+
+
+def test_the_default_connection_authenticates_the_server():
+    """Encrypted is not the same as authenticated.
+
+    ``imaplib.IMAP4_SSL`` with no ``ssl_context`` uses
+    ``ssl._create_stdlib_context()``, which leaves ``verify_mode=CERT_NONE``
+    and ``check_hostname=False``: anyone able to intercept the connection can
+    present their own certificate and read the app password and every message.
+    Releases 0.1.0 and 0.2.0 shipped that way.
+    """
+    captured: dict[str, object] = {}
+
+    def spy(self, host="", port=993, *, ssl_context=None, timeout=None):
+        captured["context"] = ssl_context
+        captured["timeout"] = timeout
+        raise OSError("stopped before opening a socket")
+
+    original = imaplib.IMAP4_SSL.__init__
+    imaplib.IMAP4_SSL.__init__ = spy  # type: ignore[method-assign]
+    try:
+        with pytest.raises(MailError):
+            YandexIMAPClient("me@yandex.ru", "secret").connect()
+    finally:
+        imaplib.IMAP4_SSL.__init__ = original  # type: ignore[method-assign]
+
+    context = captured["context"]
+    assert context is not None, "no ssl_context passed: imaplib would not verify anything"
+    assert context.verify_mode is ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+    # Without a timeout a stalled server hangs the tool call, and the agent, forever.
+    assert captured["timeout"] == DEFAULT_TIMEOUT
