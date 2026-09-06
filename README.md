@@ -18,9 +18,10 @@ your real mailbox, over IMAP, with no third-party service in the middle.
 - 🔒 **You choose what it may touch** — restrict it to specific folders, and to
   specific actions (`read`, `read,write`, …). A disallowed action is not in the
   toolset at all, so the model cannot be talked into calling it.
-- 🛟 **Nothing is lost** — a copy exists before an original is removed, deletion
-  means Trash unless you insist otherwise, and an expunge only ever names the
-  UIDs it was given.
+- 🛟 **Nothing is lost, and nothing is over-claimed** — a copy exists before an
+  original is removed, deletion means Trash unless you insist otherwise, an
+  expunge only ever names the UIDs it was given, and a UID that no longer
+  exists is refused instead of reported as done.
 - 👓 **Reading does not mark as read** — the agent peeks; `\Seen` changes only
   when you ask.
 - 🪶 **No runtime dependencies** — IMAP and MIME parsing come from Python's own
@@ -65,19 +66,27 @@ Up to six standalone tools, in the `yandex_mail` toolset:
 | Tool | Purpose |
 |---|---|
 | `yandex_mail_list_folders` | List folders with their role (inbox, sent, trash, junk, drafts, archive) and total/unread counts. |
-| `yandex_mail_search_messages` | Search a folder by sender, recipient, subject, full text, date range, unread or flagged state; returns subject, addresses, date, size, flags, and the `uid`. |
+| `yandex_mail_search_messages` | Search a folder by sender, recipient, subject, full text, date range, unread or flagged state; returns subject, addresses, date, size, flags, and the `uid`. Pages with `offset`, and reports `total` so you know whether more exist. |
 | `yandex_mail_read_message` | Read one message: headers, text body (HTML-only mail is converted to text), and the attachment list. Peeks by default. |
 | `yandex_mail_mark_message` | Mark messages read/unread and flagged/unflagged. |
-| `yandex_mail_move_message` | Move messages to another folder. |
+| `yandex_mail_move_message` | Move messages to another folder, reporting which UID each message was verified to have on arrival. |
 | `yandex_mail_delete_message` | Delete messages — to Trash by default, permanently on request. |
 
 Yandex Mail has no public REST API, so this plugin speaks **IMAP**
 (`imap.yandex.ru:993`) directly — the same protocol Yandex documents for mail
 clients. Nothing is proxied through anyone else's servers.
 
-Messages are addressed by `folder` + `uid`. UIDs are unique within a folder and
-change when a message moves, so pass back the folder each result reports. Several
-UIDs can be given at once, comma-separated: `"101,102"`.
+Messages are addressed by `folder` + `uid`, and **both are required** for read,
+mark, move, and delete: UID numbering is independent per folder, so a UID paired
+with the wrong folder would silently name a different message. Every result
+reports the folder in the server's own spelling — pass that value straight back.
+Several UIDs can be given at once, comma-separated: `"101,102"`; they are acted
+on all-or-nothing, so a batch containing a UID that no longer exists is refused
+rather than half-applied.
+
+Folder names are matched generously on the way in — `spam`, `Spam`, `junk` and
+`Корзина` all resolve to the right mailbox — because IMAP itself is
+case-sensitive and would simply answer *"No such folder"*.
 
 **This plugin does not send mail.** IMAP reads and organises an existing mailbox;
 sending is SMTP, which is deliberately out of scope — the agent can triage your
@@ -173,8 +182,11 @@ is off, or the app password lacks the Mail scope.
 - **A just-arrived message may not match a subject search for a second or two.**
   Yandex indexes `SEARCH SUBJECT` asynchronously; searching by `text`, or simply
   asking again a moment later, finds it.
-- **UIDs change when a message moves.** After a move, search the destination
-  folder if you need the new identifier.
+- **UIDs change when a message moves,** so `yandex_mail_move_message` returns a
+  `destination_uids` map from each source UID to the one the message was
+  verified to have on arrival. Use it rather than searching — Yandex cannot
+  search by `Message-ID`. A message that could not be verified is simply absent
+  from the map, never guessed.
 - **Attachments are listed, not downloaded** — name, MIME type, and size. The
   body is capped (20 000 characters by default) and says when it was truncated.
 

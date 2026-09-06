@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hermes-yandex-mail"
-version = "0.1.0"
+version = "0.2.0"
 description = "Yandex Mail plugin for Hermes Agent: search, read, flag, move, and delete messages over IMAP."
 readme = "README.md"
 license = "MIT"
