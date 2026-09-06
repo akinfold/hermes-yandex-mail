@@ -10,8 +10,9 @@ Data-safety rules encoded here, not left to the caller:
   exist in the folder — RFC 3501 §6.4.8 lets a UID command that names a
   nonexistent UID succeed silently, so without this a stale UID from an
   earlier turn would be reported as acted on while nothing happened;
-* a move uses the server's ``UID MOVE`` when available, otherwise
-  ``COPY`` → verify → mark deleted, so the copy exists before the original goes;
+* a move uses the server's ``UID MOVE`` when available, otherwise ``COPY``
+  first and only then ``\\Deleted`` + expunge — RFC 3501 makes a COPY that
+  answers OK atomic, so a failure can leave a duplicate, never a hole;
 * expunging is always ``UID EXPUNGE`` (UIDPLUS), which touches only the UIDs we
   name — a bare ``EXPUNGE`` would also erase messages someone else flagged
   ``\\Deleted`` in that folder;
@@ -179,6 +180,17 @@ class MoveResult:
 
     method: str
     destination_uids: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def original_removed(self) -> bool:
+        """Did the source message actually go?
+
+        ``copy+flagged`` means the copy landed but the server could not
+        expunge the original, which is still in the source folder carrying
+        ``\\Deleted``. Callers must be able to say "moved" only when that is
+        true, rather than reading it out of the method name.
+        """
+        return self.method != "copy+flagged"
 
 
 # -- response parsing -------------------------------------------------------
@@ -417,6 +429,7 @@ class YandexIMAPClient:
         self._allowed = [f.strip() for f in allowed_folders if f.strip()]
         self._factory = connection_factory or (lambda h, p: imaplib.IMAP4_SSL(h, p))
         self._conn: imaplib.IMAP4 | None = None
+        self._caps: frozenset[str] = frozenset()
         self._selected: tuple[str, bool] | None = None
         #: All server folders, resolved once per connection; see _cached_folder_list.
         self._folder_cache: list[Folder] | None = None
@@ -453,11 +466,28 @@ class YandexIMAPClient:
         except OSError as exc:
             raise MailError(f"Login failed: {exc}") from exc
         self._conn = conn
+        # Read before anything selects a mailbox: imaplib fills `capabilities`
+        # from the pre-authentication greeting and never refreshes it, while a
+        # server that advertises MOVE or UIDPLUS only after LOGIN puts them in
+        # the untagged CAPABILITY that `imaplib.select()` then flushes. Missing
+        # them would silently downgrade every move to copy-and-flag and make
+        # permanent delete impossible.
+        self._caps = self._read_capabilities(conn)
         return conn
+
+    @staticmethod
+    def _read_capabilities(conn: imaplib.IMAP4) -> frozenset[str]:
+        caps = {str(c).upper() for c in getattr(conn, "capabilities", ())}
+        untagged = getattr(conn, "untagged_responses", {}).get("CAPABILITY") or []
+        for line in untagged:
+            text = line.decode("ascii", "replace") if isinstance(line, bytes) else str(line)
+            caps |= {token.upper() for token in text.split()}
+        return frozenset(caps)
 
     def close(self) -> None:
         """Log out, swallowing errors — a failed logout must not mask a result."""
         conn, self._conn, self._selected = self._conn, None, None
+        self._caps = frozenset()
         self._folder_cache = None
         if conn is None:
             return
@@ -479,24 +509,9 @@ class YandexIMAPClient:
         return data
 
     def _capabilities(self) -> frozenset[str]:
-        """Every capability the server has advertised, pre- or post-login.
-
-        ``imaplib`` populates ``conn.capabilities`` once, from the pre-login
-        (or pre-STARTTLS) greeting, and never refreshes it — a server that
-        only advertises ``MOVE``/``UIDPLUS`` after authentication would
-        otherwise make every move silently downgrade to copy-and-flag with no
-        indication why. Not a live bug against Yandex (both are already in
-        its pre-auth set, and the post-login untagged CAPABILITY response is
-        identical), but merging in ``conn.untagged_responses["CAPABILITY"]``
-        — the response ``login()`` itself may have captured — costs nothing
-        and removes the assumption entirely.
-        """
-        conn = self.connect()
-        caps = {str(c).upper() for c in getattr(conn, "capabilities", ())}
-        untagged = getattr(conn, "untagged_responses", {})
-        for line in untagged.get("CAPABILITY", ()):
-            caps.update(_first_text(line).upper().split())
-        return frozenset(caps)
+        """What the server said it can do, captured once at login."""
+        self.connect()
+        return self._caps
 
     def default_folder(self) -> str:
         """The folder to use when the caller does not name one."""
@@ -701,7 +716,9 @@ class YandexIMAPClient:
             folder = _parse_list_line(line)
             if folder is None:
                 continue
-            if self._allowed and not any(same_folder(folder.name, a) for a in self._allowed):
+            # Same exact-then-case-insensitive rule the allow-list is enforced
+            # with, so this cannot advertise a folder a later call refuses.
+            if self._allowed and not self._is_allowed(folder.name):
                 continue
             folders.append(self._with_counts(folder) if with_counts else folder)
         return folders
@@ -745,6 +762,22 @@ class YandexIMAPClient:
         """
         for folder in self._cached_folder_list():
             if folder.special_use == role:
+                return folder.name
+        return None
+
+    def find_flagged_folder(self, role: str) -> str | None:
+        """Like :meth:`find_special_folder`, but only the server's own
+        special-use FLAG counts — never the folder's name.
+
+        :meth:`_special_use` falls back to matching well-known names when a
+        server sends no flag, which is right for answering "what is this
+        folder for?" but wrong for anything that bypasses the allow-list: an
+        ordinary user folder called ``Корзина`` or ``trash`` would otherwise
+        capture the role and become a delete destination the deployment
+        explicitly fenced off.
+        """
+        for folder in self._cached_folder_list():
+            if any(_SPECIAL_FLAGS.get(flag.lower()) == role for flag in folder.flags):
                 return folder.name
         return None
 
@@ -873,9 +906,11 @@ class YandexIMAPClient:
     def move(self, folder: str, uids: Sequence[str], destination: str) -> MoveResult:
         """Move messages to another folder.
 
-        Prefers the server's atomic ``UID MOVE``. Without it, the copy is made
-        and verified first and only then is the original flagged ``\\Deleted``
-        and expunged — a failure can leave a duplicate, never a hole.
+        Prefers the server's atomic ``UID MOVE``. Without it the copy is made
+        first, and only once the server has answered OK to it — which RFC 3501
+        makes an atomic guarantee that the copy exists — is the original
+        flagged ``\\Deleted`` and expunged. A failure can leave a duplicate,
+        never a hole.
 
         The destination assigns new UIDs, so ``Message-ID`` headers and the
         destination's ``UIDNEXT`` are captured before the move, and every UID
@@ -1062,7 +1097,10 @@ class YandexIMAPClient:
             )
         result = self._move_resolved(resolved_folder, uids, trash)
         return {
-            "deleted": True,
+            # False when the original survived the move (copy+flagged): the
+            # message now exists in both folders and the caller must not be
+            # told the delete completed.
+            "deleted": result.original_removed,
             # The real method, never a hard-coded "trash": "copy+flagged"
             # means the copy landed in Trash but the original is still in
             # its source folder, merely flagged \Deleted — the caller needs
@@ -1083,7 +1121,7 @@ class YandexIMAPClient:
         explicitly is unaffected and still allow-list gated (see
         :meth:`move`).
         """
-        trash = self.find_special_folder("trash")
+        trash = self.find_flagged_folder("trash")
         if trash is None:
             raise MailError(
                 "This account has no folder flagged \\Trash, so messages cannot be "
@@ -1106,7 +1144,16 @@ class YandexIMAPClient:
             )
         uid_set = ",".join(uids)
         self._uid("STORE", "STORE", uid_set, "+FLAGS", "(\\Deleted)")
-        self._expunge(uid_set)
+        try:
+            self._expunge(uid_set)
+        except MailError:
+            # The flag was ours and the erase did not happen, so take it back:
+            # leaving \Deleted set would hide the message in most clients and
+            # let the next client-issued EXPUNGE purge it — a delete the user
+            # was told had failed. Best-effort; the original error still wins.
+            with contextlib.suppress(MailError):
+                self._uid("STORE", "STORE", uid_set, "-FLAGS", "(\\Deleted)")
+            raise
         return {"deleted": True, "method": "expunge", "folder": folder}
 
     def append(

@@ -15,6 +15,10 @@ import pytest
 
 DEFAULT_CAPABILITIES = ("IMAP4REV1", "UIDPLUS", "MOVE", "LITERAL+")
 
+#: Marks a FETCH reply the test did not script, so the fake answers it from the
+#: mailbox it models instead of echoing one canned response at every read.
+FROM_MAILBOX = object()
+
 LIST_LINES = [
     b'(\\HasNoChildren \\Unmarked \\Drafts) "|" Drafts',
     b'(\\HasNoChildren \\Marked \\NoInferiors) "|" INBOX',
@@ -96,7 +100,7 @@ class FakeIMAP:
             "SELECT": ("OK", [b"1"]),
             "STATUS": ("OK", [b"INBOX (MESSAGES 3 UNSEEN 2)"]),
             "SEARCH": ("OK", [b"5 6 8"]),
-            "FETCH": ("OK", fetch_summary_response()),
+            "FETCH": FROM_MAILBOX,
             "STORE": ("OK", [b"1 (UID 8 FLAGS (\\Seen))"]),
             "COPY": ("OK", [b"[COPYUID 1 8 12] Completed"]),
             "MOVE": ("OK", [b"[COPYUID 1 8 12] Completed"]),
@@ -136,9 +140,30 @@ class FakeIMAP:
 
     def uid(self, command: str, *args: Any) -> tuple[str, list]:
         self.calls.append(("uid", command.upper(), *args))
-        if command.upper() == "FETCH" and args[-1:] == ("(UID)",):
-            return "OK", self._existence_reply(str(args[0]))
+        if command.upper() == "FETCH":
+            reply = self._fetch_reply(args)
+            if reply is not None:
+                return reply
         return self._reply(command.upper())
+
+    def _fetch_reply(self, args: tuple[Any, ...]) -> tuple[str, list] | None:
+        """Answer a FETCH from the modelled mailbox, unless a test scripted one.
+
+        Both the bare ``(UID)`` existence probe and the fuller summary read
+        the client uses as a move's existence check must reflect
+        ``existing_uids`` — answering either from a canned response would let
+        a missing message look present, which is the whole bug the probe
+        exists to catch.
+        """
+        if args[-1:] == ("(UID)",):
+            return "OK", self._existence_reply(str(args[0]))
+        if self.responses.get("FETCH") is not FROM_MAILBOX:
+            return None
+        uids = [u for u in str(args[0]).split(",") if u in self.existing_uids]
+        data: list[Any] = []
+        for uid in uids:
+            data += fetch_summary_response(uid=int(uid))
+        return "OK", data
 
     def _existence_reply(self, uid_set: str) -> list[Any]:
         """What the server answers a bare ``UID FETCH <set> (UID)``: one line

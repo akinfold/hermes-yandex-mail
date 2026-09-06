@@ -807,3 +807,148 @@ def test_a_socket_failure_during_login_is_reported():
 
     with pytest.raises(MailError, match="Login failed"):
         make_client(Rude()).connect()
+
+
+# -- what the fixes must keep true ------------------------------------------
+# Each test below was written against a deliberate mutation of the fix it
+# covers: revert the fix and the test fails. A green suite that survives the
+# removal of a safety check is worse than no test, because it certifies it.
+
+
+def test_a_missing_uid_is_refused_rather_than_silently_ignored(fake_imap):
+    """RFC 3501 §6.4.8: the server answers OK and does nothing for a UID that
+    does not exist, so without an explicit probe every stale UID from an
+    earlier conversation turn reports success."""
+    fake_imap.existing_uids = {"8"}
+    with make_client(fake_imap) as client, pytest.raises(MailError, match="9 not found"):
+        client.store_flags("INBOX", ["9"], add=["\\Seen"])
+    assert "STORE" not in fake_imap.command_names()
+
+
+@pytest.mark.parametrize(
+    ("action", "kwargs"),
+    [
+        ("store_flags", {"add": ["\\Seen"]}),
+        ("move", {"destination": "Trash"}),
+        ("delete", {}),
+        ("delete", {"permanent": True}),
+    ],
+)
+def test_a_partly_missing_batch_is_refused_whole(fake_imap, action, kwargs):
+    """All-or-nothing: acting on the half that exists would report a complete
+    result for a partial action."""
+    fake_imap.existing_uids = {"8"}
+    with make_client(fake_imap) as client, pytest.raises(MailError, match="9 not found"):
+        if action == "move":
+            client.move("INBOX", ["8", "9"], kwargs["destination"])
+        elif action == "delete":
+            client.delete("INBOX", ["8", "9"], **kwargs)
+        else:
+            client.store_flags("INBOX", ["8", "9"], **kwargs)
+    for destructive in ("STORE", "MOVE", "COPY", "EXPUNGE"):
+        assert destructive not in fake_imap.command_names()
+
+
+def test_only_a_flagged_trash_folder_may_bypass_the_allow_list():
+    """A user folder merely *named* like a trash folder must not capture the
+    role: the delete path bypasses the allow-list for Trash, so letting a name
+    win would route deletes into a folder the deployment fenced off."""
+    fake = FakeIMAP(
+        list_data=[
+            b'(\\HasNoChildren) "|" INBOX',
+            b'(\\HasNoChildren) "|" "&BBoEPgRABDcEOAQ9BDA-"',  # Корзина, no flag
+            b'(\\HasNoChildren \\Trash) "|" Trash',
+        ]
+    )
+    with make_client(fake, allowed_folders=["INBOX"]) as client:
+        assert client.find_special_folder("trash") == "Корзина"  # name fallback
+        assert client.find_flagged_folder("trash") == "Trash"  # flag only
+        result = client.delete("INBOX", ["8"])
+    assert result["trash_folder"] == "Trash"
+    move = next(c for c in fake.calls if c[0] == "uid" and c[1] == "MOVE")
+    assert move[3] == b'"Trash"'
+
+
+def test_capabilities_survive_the_first_select():
+    """imaplib fills `capabilities` from the pre-auth greeting and flushes the
+    post-login untagged CAPABILITY on the first SELECT, so a server that only
+    advertises MOVE after LOGIN would silently downgrade every move."""
+
+    class PostLoginCaps(FakeIMAP):
+        def __init__(self):
+            super().__init__(capabilities=("IMAP4REV1",))
+            self.untagged_responses: dict[str, list] = {}
+
+        def login(self, user, password):
+            self.untagged_responses["CAPABILITY"] = [b"IMAP4rev1 UIDPLUS MOVE"]
+            return super().login(user, password)
+
+        def select(self, mailbox=b"INBOX", readonly=False):
+            self.untagged_responses.pop("CAPABILITY", None)  # what imaplib does
+            return super().select(mailbox, readonly)
+
+    fake = PostLoginCaps()
+    with make_client(fake) as client:
+        client.move("INBOX", ["8"], "Trash")
+    assert "MOVE" in fake.command_names()
+    assert "COPY" not in fake.command_names()
+
+
+def test_a_failed_expunge_takes_back_the_deleted_flag(fake_imap):
+    """The flag was ours and the erase did not happen: leaving it set would
+    hide the message and let the next client's EXPUNGE purge it."""
+    fake_imap.responses["EXPUNGE"] = ("NO", [b"server said no"])
+    with make_client(fake_imap) as client, pytest.raises(MailError):
+        client.delete("INBOX", ["8"], permanent=True)
+    stores = [c for c in fake_imap.calls if c[0] == "uid" and c[1] == "STORE"]
+    assert [s[3] for s in stores] == ["+FLAGS", "-FLAGS"]
+
+
+def test_a_move_that_could_not_remove_the_original_does_not_claim_it_did(fake_imap):
+    fake_imap.capabilities = ("IMAP4REV1",)  # no MOVE, no UIDPLUS
+    with make_client(fake_imap) as client:
+        result = client.move("INBOX", ["8"], "Trash")
+    assert result.method == "copy+flagged"
+    assert result.original_removed is False
+
+
+def test_list_folders_never_advertises_a_folder_it_would_refuse():
+    """IMAP names are case-sensitive, so a server can hold both. Listing one
+    the allow-list then rejects costs the agent a wasted turn."""
+    fake = FakeIMAP(
+        list_data=[
+            b'(\\HasNoChildren) "|" INBOX',
+            b'(\\HasNoChildren) "|" Archive',
+            b'(\\HasNoChildren) "|" archive',
+        ]
+    )
+    with make_client(fake, allowed_folders=["Archive"]) as client:
+        assert [f.name for f in client.list_folders()] == ["Archive"]
+        with pytest.raises(MailError, match="not in the allowed list"):
+            client.search("archive", SearchQuery())
+
+
+def test_the_selected_cache_is_cleared_before_a_select_is_attempted(fake_imap):
+    """A failed SELECT leaves no mailbox selected; a cache that still claimed
+    one would let the next command run against the wrong folder."""
+    with make_client(fake_imap) as client:
+        client.search("INBOX", SearchQuery())
+        assert client._selected == ("INBOX", True)
+        fake_imap.responses["SELECT"] = ("NO", [b"gone"])
+        with pytest.raises(MailError):
+            client.search("Spam", SearchQuery())
+        assert client._selected is None
+
+
+def test_move_refuses_a_destination_the_allow_list_forbids(fake_imap):
+    """The Trash exemption is for the delete safety net only. A plain move must
+    still be gated at the client level, not merely by the tool layer above it —
+    a library caller reaching `move` directly must not slip past the fence.
+    """
+    with (
+        make_client(fake_imap, allowed_folders=["INBOX"]) as client,
+        pytest.raises(MailError, match="not in the allowed list"),
+    ):
+        client.move("INBOX", ["8"], "Spam")
+    for destructive in ("MOVE", "COPY", "STORE", "EXPUNGE"):
+        assert destructive not in fake_imap.command_names()

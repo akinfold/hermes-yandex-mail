@@ -105,9 +105,15 @@ def test_search_offset_pages_past_the_newest_matches(imap):
     assert fetch[2] == "2,3"
 
 
-def test_search_offset_beyond_the_last_match_returns_no_messages(imap):
+@pytest.mark.parametrize("offset", [3, 4, 5, 6, 10])
+def test_search_offset_beyond_the_last_match_returns_no_messages(imap, offset):
+    """The pre-fix slice was ``uids[: len(uids) - offset]``, which goes negative
+    and re-serves already-seen mail for ``len < offset < 2 * len`` — offsets 4
+    and 5 here. An offset of 10 alone would have missed the bug entirely, since
+    the broken slice also yields nothing once ``offset >= 2 * len``.
+    """
     imap.responses["SEARCH"] = ("OK", [b"1 2 3"])
-    result = call(tool.handle_search, offset=10)
+    result = call(tool.handle_search, offset=offset)
     assert result["total"] == 3
     assert result["messages"] == []
     assert "FETCH" not in imap.command_names()
@@ -260,6 +266,16 @@ def test_mark_de_duplicates_repeated_uids(imap):
     assert store[2] == "8,9"
 
 
+def test_a_uid_written_with_a_leading_zero_still_finds_its_message(imap):
+    """The server answers "UID 8", so comparing "008" as text would report the
+    caller's own existing message missing — and refuse the whole batch with it.
+    """
+    result = call(tool.handle_mark, uid="008", folder="INBOX", read=True)
+    assert result["uids"] == ["8"]
+    store = next(c for c in imap.calls if c[0] == "uid" and c[1] == "STORE")
+    assert store[2] == "8"
+
+
 def test_mark_needs_something_to_change(imap):
     assert "Nothing to change" in call(tool.handle_mark, uid="8", folder="INBOX")["error"]
 
@@ -280,6 +296,7 @@ def test_move(imap):
     result = call(tool.handle_move, uid="8", folder="INBOX", destination="Trash")
     assert result == {
         "moved": True,
+        "original_removed": True,
         "uids": ["8"],
         "from": "INBOX",
         "to": "Trash",
@@ -296,6 +313,25 @@ def test_move_reports_the_servers_folder_spelling(imap):
     result = call(tool.handle_move, uid="8", folder="spam", destination="trash")
     assert result["from"] == "Spam"
     assert result["to"] == "Trash"
+
+
+def test_move_does_not_report_success_when_the_original_survived(imap):
+    """Without MOVE and without UIDPLUS the copy lands but the original stays,
+    flagged \\Deleted. The headline "moved" is what a model reads first, so it
+    must not say the move completed while a duplicate is left behind.
+    """
+    imap.capabilities = ("IMAP4REV1",)
+    result = call(tool.handle_move, uid="8", folder="INBOX", destination="Trash")
+    assert result["method"] == "copy+flagged"
+    assert result["moved"] is False
+    assert result["original_removed"] is False
+
+
+def test_delete_does_not_report_success_when_the_original_survived(imap):
+    imap.capabilities = ("IMAP4REV1",)
+    result = call(tool.handle_delete, uid="8", folder="INBOX")
+    assert result["method"] == "copy+flagged"
+    assert result["deleted"] is False
 
 
 def test_move_requires_a_destination(imap):

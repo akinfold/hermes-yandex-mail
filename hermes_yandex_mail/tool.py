@@ -159,8 +159,9 @@ MOVE_SCHEMA: dict[str, Any] = {
     "name": "yandex_mail_move_message",
     "description": (
         "Move one or more messages to another folder. The copy is created before the "
-        "original is removed, so a message is never lost in transit. Note that UIDs change "
-        "on arrival — search the destination folder if you need the new ones."
+        "original is removed, so a failure can leave a duplicate but never lose the "
+        "message. UIDs change on arrival: the result maps each source UID to the UID "
+        "the message was verified to have in the destination — use that, do not guess."
     ),
     "parameters": {
         "type": "object",
@@ -226,10 +227,12 @@ def _uids(args: dict[str, Any]) -> list[str]:
     invalid = [u for u in uids if not u.isdigit()]
     if invalid:
         raise ValueError(f"Not a message UID: {', '.join(invalid)}. UIDs are numbers.")
-    # De-duplicated, order preserved: a model that repeats a UID should not
-    # make the plugin send "UID STORE 8,8" or count one message twice in a
-    # result that reports what was acted on.
-    return list(dict.fromkeys(uids))
+    # Normalised before de-duplication: the server answers "UID 8", so a
+    # model writing "008" would have its own, existing message reported
+    # missing — and with all-or-nothing batching, take the rest down with it.
+    # De-duplicated too, order preserved, so a repeated UID neither becomes
+    # "UID STORE 8,8" nor is counted twice in the reported result.
+    return list(dict.fromkeys(str(int(u)) for u in uids))
 
 
 def _required_folder(args: dict[str, Any]) -> str:
@@ -434,7 +437,12 @@ def handle_move(args: dict[str, Any], **_kwargs: Any) -> str:
             result = client.move(folder, uids, target)
         return _dump(
             {
-                "moved": True,
+                # False when the copy landed but the original could not be
+                # removed: the headline field is what a model reads first, and
+                # it must not say the move completed when a duplicate is left
+                # behind — "method" alone is one key too far away.
+                "moved": result.original_removed,
+                "original_removed": result.original_removed,
                 "uids": uids,
                 "from": folder,
                 "to": target,
