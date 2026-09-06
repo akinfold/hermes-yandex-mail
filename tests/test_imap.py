@@ -7,12 +7,14 @@ import imaplib
 import pytest
 
 from hermes_yandex_mail.imap import (
+    _SPECIAL_NAMES,
     Folder,
     MailError,
     MessageSummary,
     SearchQuery,
     YandexIMAPClient,
     normalize_email,
+    same_folder,
 )
 
 from .conftest import FakeIMAP, fetch_body_response, fetch_summary_response
@@ -43,6 +45,20 @@ def make_client(fake: FakeIMAP, **kwargs) -> YandexIMAPClient:
 )
 def test_normalize_email(raw, expected):
     assert normalize_email(raw) == expected
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "expected"),
+    [
+        ("INBOX", "inbox", True),
+        ("Trash", "trash", True),
+        ("Trash", "  trash  ", True),
+        ("Trash", "Sent", False),
+        ("удалённые", "УДАЛЁННЫЕ", True),
+    ],
+)
+def test_same_folder(a, b, expected):
+    assert same_folder(a, b) is expected
 
 
 def test_message_summary_flag_properties():
@@ -92,9 +108,11 @@ def test_close_without_a_connection_is_a_no_op(fake_imap):
 
 
 def test_a_no_reply_becomes_a_mail_error(fake_imap):
+    # INBOX resolves without touching the network, so this reaches the SELECT
+    # this test actually means to exercise.
     fake_imap.responses["SELECT"] = ("NO", [b"Mailbox does not exist"])
     with make_client(fake_imap) as client, pytest.raises(MailError, match="Mailbox does not exist"):
-        client.search("Nope", SearchQuery())
+        client.search("INBOX", SearchQuery())
 
 
 def test_socket_error_mid_command_becomes_a_mail_error(fake_imap):
@@ -145,8 +163,11 @@ def test_allow_list_hides_other_folders(fake_imap):
         assert [f.name for f in client.list_folders()] == ["INBOX", "Sent"]
         assert client.default_folder() == "INBOX"
         assert client.check_folder("sent") == "sent"
+        # check_folder is a cheap, network-free pre-check: it lets "Trash" through
+        # because that word *could* resolve to an allowed folder once the server's
+        # real list is known. _select (via search here) has the final say.
         with pytest.raises(MailError, match="not in the allowed list"):
-            client.check_folder("Trash")
+            client.search("Trash", SearchQuery())
 
 
 def test_check_folder_defaults_to_inbox(fake_imap):
@@ -160,6 +181,148 @@ def test_find_special_folder(fake_imap):
     with make_client(fake_imap) as client:
         assert client.find_special_folder("trash") == "Trash"
         assert client.find_special_folder("nothing-like-this") is None
+
+
+# -- folder resolution --------------------------------------------------------
+# IMAP mailbox names are case-sensitive except INBOX: Yandex rejects
+# SELECT "spam" with [CLIENTBUG] No such folder while SELECT "Spam" works.
+
+
+def test_resolve_folder_matches_case_insensitively(fake_imap):
+    with make_client(fake_imap) as client:
+        client.search("spam", SearchQuery())
+    select = next(c for c in fake_imap.calls if c[0] == "select")
+    assert select[1] == b'"Spam"'
+
+
+def test_resolve_folder_matches_a_role_word(fake_imap):
+    with make_client(fake_imap) as client:
+        client.search("junk", SearchQuery())
+    select = next(c for c in fake_imap.calls if c[0] == "select")
+    assert select[1] == b'"Spam"'
+
+
+def test_resolve_folder_matches_a_localized_synonym(fake_imap):
+    # "удалённые" is not itself a folder name here, but _SPECIAL_NAMES maps it
+    # to the "trash" role, and the account's Trash-flagged folder is "Trash".
+    with make_client(fake_imap) as client:
+        client.search("удалённые", SearchQuery())
+    select = next(c for c in fake_imap.calls if c[0] == "select")
+    assert select[1] == b'"Trash"'
+
+
+def test_resolve_folder_reports_available_folders_when_nothing_matches(fake_imap):
+    with make_client(fake_imap) as client, pytest.raises(MailError) as excinfo:
+        client.search("does-not-exist", SearchQuery())
+    message = str(excinfo.value)
+    assert "No such folder" in message
+    assert "Trash" in message
+    assert "Spam" in message
+
+
+def test_inbox_resolves_without_touching_the_network(fake_imap):
+    with make_client(fake_imap) as client:
+        client.search("inbox", SearchQuery())
+    assert [c for c in fake_imap.calls if c[0] == "list"] == []
+
+
+def test_folder_resolution_is_cached_per_connection(fake_imap):
+    with make_client(fake_imap) as client:
+        client.search("spam", SearchQuery())
+        client.summary("Trash", "8")
+    assert len([c for c in fake_imap.calls if c[0] == "list"]) == 1
+
+
+def test_folder_cache_is_dropped_on_close(fake_imap):
+    client = make_client(fake_imap)
+    client.search("spam", SearchQuery())
+    client.close()
+    client.search("spam", SearchQuery())
+    assert len([c for c in fake_imap.calls if c[0] == "list"]) == 2
+
+
+def test_check_folder_lets_a_possibly_valid_synonym_through(fake_imap):
+    with make_client(fake_imap, allowed_folders=["Trash"]) as client:
+        # Cheap and network-free: "удалённые" is a recognized synonym that could
+        # resolve to the allowed "Trash" folder, so it is not rejected here.
+        assert client.check_folder("удалённые") == "удалённые"
+
+
+def test_check_folder_rejects_an_unrecognizable_name_without_touching_the_network(fake_imap):
+    with (
+        make_client(fake_imap, allowed_folders=["INBOX"]) as client,
+        pytest.raises(MailError, match="not in the allowed list"),
+    ):
+        client.check_folder("qwerty")
+    assert fake_imap.calls == []
+
+
+def test_allow_list_is_enforced_against_the_resolved_name(fake_imap):
+    with (
+        make_client(fake_imap, allowed_folders=["Sent"]) as client,
+        pytest.raises(MailError, match="not in the allowed list"),
+    ):
+        client.search("trash", SearchQuery())
+
+
+def test_resolve_folder_role_word_with_no_matching_folder_is_reported(fake_imap):
+    # "архив" recognizes as the "archive" role, but no folder in LIST_LINES
+    # plays that role — this must fall through to the same "no such folder"
+    # error as any other unresolvable name, never a wrong guess.
+    with make_client(fake_imap) as client, pytest.raises(MailError, match="No such folder"):
+        client.search("архив", SearchQuery())
+
+
+def test_no_such_folder_message_lists_only_allowed_folders(fake_imap):
+    with (
+        make_client(fake_imap, allowed_folders=["Sent"]) as client,
+        pytest.raises(MailError) as excinfo,
+    ):
+        client.search("does-not-exist", SearchQuery())
+    message = str(excinfo.value)
+    assert "Sent" in message
+    assert "Trash" not in message
+
+
+def test_cached_folder_list_skips_non_bytes_entries(fake_imap):
+    fake_imap.responses["LIST"] = ("OK", [b'(\\HasNoChildren \\Marked \\Trash) "|" Trash', None])
+    with make_client(fake_imap) as client:
+        client.search("trash", SearchQuery())
+    select = next(c for c in fake_imap.calls if c[0] == "select")
+    assert select[1] == b'"Trash"'
+
+
+# One folder per role, so every alias in _SPECIAL_NAMES has something to
+# resolve to — the shared LIST_LINES fixture has no Archive-flagged folder.
+_ROLE_LIST_LINES = [
+    b'(\\HasNoChildren \\Marked \\NoInferiors) "|" INBOX',
+    b'(\\HasNoChildren \\Unmarked \\Sent) "|" Sent',
+    b'(\\HasNoChildren \\Marked \\Trash) "|" Trash',
+    b'(\\HasNoChildren \\Unmarked \\Junk) "|" Spam',
+    b'(\\HasNoChildren \\Unmarked \\Drafts) "|" Drafts',
+    b'(\\HasNoChildren \\Unmarked \\Archive) "|" Archive',
+]
+
+_SELECT_BYTES_BY_ROLE = {
+    "inbox": b'"INBOX"',
+    "sent": b'"Sent"',
+    "trash": b'"Trash"',
+    "junk": b'"Spam"',
+    "drafts": b'"Drafts"',
+    "archive": b'"Archive"',
+}
+
+
+@pytest.mark.parametrize("alias", sorted(_SPECIAL_NAMES))
+def test_every_special_name_alias_resolves_to_its_role_folder(alias):
+    # A model will say "spam", "Корзина", "входящие", "архив" etc. constantly;
+    # every alias this package recognizes must actually resolve on the server.
+    fake = FakeIMAP(list_data=list(_ROLE_LIST_LINES))
+    role = _SPECIAL_NAMES[alias]
+    with make_client(fake) as client:
+        client.search(alias, SearchQuery())
+    select = next(c for c in fake.calls if c[0] == "select")
+    assert select[1] == _SELECT_BYTES_BY_ROLE[role]
 
 
 # -- search and fetch -------------------------------------------------------
@@ -267,9 +430,6 @@ def test_select_is_not_repeated_for_the_same_folder(fake_imap):
     assert len([c for c in fake_imap.calls if c[0] == "select"]) == 1
 
 
-# -- flags, move, delete ----------------------------------------------------
-
-
 def test_store_flags_adds_and_removes(fake_imap):
     with make_client(fake_imap) as client:
         client.store_flags("INBOX", ["8", "9"], add=["\\Seen"], remove=["\\Flagged"])
@@ -285,28 +445,37 @@ def test_store_flags_needs_uids(fake_imap):
 
 def test_move_uses_the_server_move_when_available(fake_imap):
     with make_client(fake_imap) as client:
-        assert client.move("INBOX", ["8"], "Trash") == "move"
-    assert fake_imap.command_names() == ["MOVE"]
+        result = client.move("INBOX", ["8"], "Trash")
+    assert result.method == "move"
+    # FETCH reads the Message-ID before the move; the second FETCH ranges over
+    # the destination's UIDNEXT: to verify the new UID afterwards (Yandex does
+    # not support SEARCH HEADER MESSAGE-ID).
+    assert fake_imap.command_names() == ["FETCH", "MOVE", "FETCH"]
 
 
 def test_move_without_move_capability_copies_before_deleting(fake_imap):
     fake_imap.capabilities = ("IMAP4REV1", "UIDPLUS")
     with make_client(fake_imap) as client:
-        assert client.move("INBOX", ["8"], "Archive") == "copy+expunge"
+        result = client.move("INBOX", ["8"], "Drafts")
+    assert result.method == "copy+expunge"
     # Order matters: the copy must exist before the original is marked deleted.
-    assert fake_imap.command_names() == ["COPY", "STORE", "EXPUNGE"]
+    assert fake_imap.command_names() == ["FETCH", "COPY", "STORE", "EXPUNGE", "FETCH"]
 
 
 def test_move_without_uidplus_leaves_the_original_flagged_not_expunged(fake_imap):
     fake_imap.capabilities = ("IMAP4REV1",)
     with make_client(fake_imap) as client:
-        assert client.move("INBOX", ["8"], "Archive") == "copy+flagged"
+        result = client.move("INBOX", ["8"], "Drafts")
+    assert result.method == "copy+flagged"
     assert "EXPUNGE" not in fake_imap.command_names()
 
 
 def test_move_refuses_the_same_folder(fake_imap):
     with make_client(fake_imap) as client, pytest.raises(MailError, match="same"):
         client.move("INBOX", ["8"], "inbox")
+    # Resolving both names to "INBOX" needs no network, so this fails before
+    # any command — not even a connection is opened.
+    assert fake_imap.calls == []
 
 
 def test_move_needs_uids(fake_imap):
@@ -318,29 +487,214 @@ def test_a_failed_copy_never_deletes_the_original(fake_imap):
     fake_imap.capabilities = ("IMAP4REV1", "UIDPLUS")
     fake_imap.responses["COPY"] = ("NO", [b"Over quota"])
     with make_client(fake_imap) as client, pytest.raises(MailError, match="Over quota"):
-        client.move("INBOX", ["8"], "Archive")
-    assert fake_imap.command_names() == ["COPY"]
+        client.move("INBOX", ["8"], "Drafts")
+    # The Message-ID read is harmless and happens regardless; the important
+    # invariant — no STORE/EXPUNGE before a verified copy — still holds.
+    assert fake_imap.command_names() == ["FETCH", "COPY"]
+
+
+# Yandex does not support SEARCH HEADER MESSAGE-ID (verified live: it answers
+# "[UNAVAILABLE] UID SEARCH Backend error"), so the destination UID lookup
+# ranges over UIDNEXT:* instead and matches Message-ID headers exactly. The
+# default fixture scripts a static FETCH reply, so the tests below that need
+# the pre- and post-move FETCH calls to answer differently use a counter.
+
+_OTHER_MESSAGE_HEADERS = (
+    b"Subject: Unrelated\r\n"
+    b"From: someone@example.org\r\n"
+    b"To: hermesplugins@yandex.ru\r\n"
+    b"Date: Sun, 26 Jul 2026 01:40:20 +0300\r\n"
+    b"Message-ID: <different@yandex.ru>\r\n"
+    b"\r\n"
+)
+
+
+def test_move_returns_the_verified_destination_uid(fake_imap):
+    fake_imap.responses["UIDNEXT"] = ("OK", [b"13"])
+    state = {"fetches": 0}
+
+    def fetch_reply():
+        state["fetches"] += 1
+        # 1st FETCH: source uid 8's Message-ID, before the move.
+        # 2nd FETCH: the UIDNEXT: range in the destination, after the move —
+        # the same message landed there as uid 13.
+        return "OK", fetch_summary_response(uid=8 if state["fetches"] == 1 else 13)
+
+    fake_imap.responses["FETCH"] = fetch_reply
+    with make_client(fake_imap) as client:
+        result = client.move("INBOX", ["8"], "Trash")
+    assert result.method == "move"
+    assert result.destination_uids == {"8": "13"}
+    fetches = [c for c in fake_imap.calls if c[0] == "uid" and c[1] == "FETCH"]
+    assert fetches[1][2] == "13:*"
+
+
+def test_move_excludes_a_destination_message_with_a_different_message_id(fake_imap):
+    # A message that merely happens to land in the UIDNEXT: range (e.g. new
+    # mail arriving between the move and the lookup) must never be mistaken
+    # for the one that was moved — only an exact Message-ID match counts.
+    fake_imap.responses["UIDNEXT"] = ("OK", [b"13"])
+    state = {"fetches": 0}
+
+    def fetch_reply():
+        state["fetches"] += 1
+        if state["fetches"] == 1:
+            return "OK", fetch_summary_response(uid=8)
+        return "OK", fetch_summary_response(uid=13, headers=_OTHER_MESSAGE_HEADERS)
+
+    fake_imap.responses["FETCH"] = fetch_reply
+    with make_client(fake_imap) as client:
+        result = client.move("INBOX", ["8"], "Trash")
+    assert result.destination_uids == {}
+
+
+def test_move_skips_the_destination_lookup_without_uidnext(fake_imap):
+    # No UIDNEXT captured (e.g. the server sent none) means the range is
+    # unknown, so the lookup is skipped entirely rather than scanning blind.
+    fake_imap.responses["UIDNEXT"] = ("OK", [])
+    with make_client(fake_imap) as client:
+        result = client.move("INBOX", ["8"], "Trash")
+    assert result.destination_uids == {}
+    assert fake_imap.command_names().count("FETCH") == 1
+
+
+def test_move_destination_uidnext_capture_failure_does_not_fail_the_move(fake_imap):
+    # The 1st SELECT is the source (message-id read); the 2nd is the
+    # destination EXAMINE used only to capture UIDNEXT — that one fails here,
+    # so the lookup is skipped, but the move itself must still go through.
+    state = {"selects": 0}
+
+    def flaky_select():
+        state["selects"] += 1
+        if state["selects"] == 2:
+            raise imaplib.IMAP4.error("cannot examine destination")
+        return "OK", [b"1"]
+
+    fake_imap.responses["SELECT"] = flaky_select
+    with make_client(fake_imap) as client:
+        result = client.move("INBOX", ["8"], "Trash")
+    assert result.method == "move"
+    assert result.destination_uids == {}
+
+
+def test_move_destination_fetch_failure_does_not_fail_the_move(fake_imap):
+    state = {"fetches": 0}
+
+    def fetch_reply():
+        state["fetches"] += 1
+        if state["fetches"] == 1:
+            return "OK", fetch_summary_response(uid=8)
+        raise OSError("broken pipe")
+
+    fake_imap.responses["FETCH"] = fetch_reply
+    with make_client(fake_imap) as client:
+        result = client.move("INBOX", ["8"], "Trash")
+    assert result.method == "move"
+    assert result.destination_uids == {}
+
+
+def test_move_destination_examine_failure_does_not_fail_the_move(fake_imap):
+    # The 1st SELECT is the source (message-id read), the 2nd is the
+    # destination EXAMINE for UIDNEXT (must succeed so the lookup is even
+    # attempted), the 3rd re-selects the source before the move itself, and
+    # the 4th is the destination EXAMINE inside the post-move lookup — that
+    # one fails here.
+    state = {"selects": 0}
+
+    def flaky_select():
+        state["selects"] += 1
+        if state["selects"] == 4:
+            raise imaplib.IMAP4.error("cannot select destination")
+        return "OK", [b"1"]
+
+    fake_imap.responses["SELECT"] = flaky_select
+    with make_client(fake_imap) as client:
+        result = client.move("INBOX", ["8"], "Trash")
+    assert result.method == "move"
+    assert result.destination_uids == {}
+
+
+def test_move_skips_the_destination_lookup_without_a_message_id(fake_imap):
+    fake_imap.responses["FETCH"] = ("OK", [(b"1 (UID 8 BODY[HEADER] {2}", b"\r\n"), b")"])
+    with make_client(fake_imap) as client:
+        result = client.move("INBOX", ["8"], "Trash")
+    assert result.destination_uids == {}
+    # No Message-ID was captured, so the destination is never even examined.
+    assert fake_imap.command_names().count("FETCH") == 1
 
 
 def test_delete_moves_to_trash_by_default(fake_imap):
+    fake_imap.responses["UIDNEXT"] = ("OK", [b"13"])
+    state = {"fetches": 0}
+
+    def fetch_reply():
+        # The destination really does renumber: the message read as uid 8 in
+        # INBOX comes back as uid 13 in Trash. Scripting both reads apart is
+        # what makes this test able to fail — a static reply would let the
+        # source UID be echoed back as if it had been verified.
+        state["fetches"] += 1
+        return "OK", fetch_summary_response(uid=8 if state["fetches"] == 1 else 13)
+
+    fake_imap.responses["FETCH"] = fetch_reply
     with make_client(fake_imap) as client:
         result = client.delete("INBOX", ["8"])
-    assert result == {"deleted": True, "method": "trash", "trash_folder": "Trash"}
+    assert result == {
+        "deleted": True,
+        # The real method, not a hard-coded "trash": had the server lacked
+        # MOVE and left the original behind, the caller would see it here.
+        "method": "move",
+        "trash_folder": "Trash",
+        "destination_uids": {"8": "13"},
+    }
     assert "MOVE" in fake_imap.command_names()
     assert "EXPUNGE" not in fake_imap.command_names()
 
 
-def test_delete_from_trash_expunges(fake_imap):
-    with make_client(fake_imap) as client:
-        result = client.delete("Trash", ["8"])
-    assert result["method"] == "expunge"
+def test_delete_to_trash_still_reports_destination_uids_under_an_allow_list(fake_imap):
+    """The soft-delete safety net must not lose the destination lookup.
+
+    Trash is deliberately exempt from the folder allow-list so restricting
+    YANDEX_MAIL_FOLDERS cannot turn every delete into an irreversible
+    expunge. The lookups that run inside that move (the destination's
+    UIDNEXT, and the post-move read) must therefore not re-run the
+    allow-list check either — doing so silently stripped the mapping from
+    every soft delete on a fenced deployment.
+    """
+    fake_imap.responses["UIDNEXT"] = ("OK", [b"13"])
+    state = {"fetches": 0}
+
+    def fetch_reply():
+        state["fetches"] += 1
+        return "OK", fetch_summary_response(uid=8 if state["fetches"] == 1 else 13)
+
+    fake_imap.responses["FETCH"] = fetch_reply
+    with make_client(fake_imap, allowed_folders=["INBOX"]) as client:
+        result = client.delete("INBOX", ["8"])
+    assert result["trash_folder"] == "Trash"
+    assert result["destination_uids"] == {"8": "13"}
+
+
+def test_delete_from_trash_refuses_to_silently_no_op(fake_imap):
+    # This was the bug: deleting from Trash without permanent=True used to
+    # return {"deleted": True, ...} while sending no command at all.
+    with make_client(fake_imap) as client, pytest.raises(MailError, match="already in the Trash"):
+        client.delete("Trash", ["8"])
+    assert fake_imap.command_names() == []
+
+
+def test_delete_from_trash_is_detected_regardless_of_case(fake_imap):
+    with make_client(fake_imap) as client, pytest.raises(MailError, match="already in the Trash"):
+        client.delete("trash", ["8"])
+    assert fake_imap.command_names() == []
 
 
 def test_delete_permanently_expunges_only_those_uids(fake_imap):
     with make_client(fake_imap) as client:
         result = client.delete("INBOX", ["8", "9"], permanent=True)
     assert result == {"deleted": True, "method": "expunge", "folder": "INBOX"}
-    assert fake_imap.command_names() == ["STORE", "EXPUNGE"]
+    # The FETCH is the existence probe: a UID that no longer exists must be
+    # refused before anything is flagged, not silently expunged into nothing.
+    assert fake_imap.command_names() == ["FETCH", "STORE", "EXPUNGE"]
     expunge = next(c for c in fake_imap.calls if c[0] == "uid" and c[1] == "EXPUNGE")
     assert expunge[2] == "8,9"
 
@@ -354,7 +708,7 @@ def test_permanent_delete_refuses_without_uidplus(fake_imap):
 
 def test_delete_without_a_trash_folder_explains_itself():
     fake = FakeIMAP(list_data=[b'(\\HasNoChildren) "|" INBOX'])
-    with make_client(fake) as client, pytest.raises(MailError, match="No Trash folder"):
+    with make_client(fake) as client, pytest.raises(MailError, match=r"no folder flagged"):
         client.delete("INBOX", ["8"])
 
 
@@ -383,11 +737,13 @@ def test_append_without_appenduid(fake_imap):
     assert call[2] is None
 
 
-def test_folder_name_with_a_quote_is_escaped(fake_imap):
-    with make_client(fake_imap) as client:
-        client.search('Odd"name', SearchQuery())
-    select = next(c for c in fake_imap.calls if c[0] == "select")
-    assert select[1] == b'"Odd\\"name"'
+def test_folder_name_with_a_quote_is_escaped():
+    # _quote_mailbox is exercised end to end elsewhere (e.g. test_append_*);
+    # tested directly here since a folder name has to exist on the server to
+    # reach SELECT at all now that folder resolution runs first.
+    from hermes_yandex_mail.imap import _quote_mailbox
+
+    assert _quote_mailbox('Odd"name') == b'"Odd\\"name"'
 
 
 def test_bad_date_is_reported_clearly(fake_imap):

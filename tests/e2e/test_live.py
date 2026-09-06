@@ -14,6 +14,7 @@ import json
 import time
 import uuid
 from email.message import EmailMessage
+from email.utils import make_msgid
 
 import pytest
 
@@ -75,6 +76,10 @@ def _throwaway_message(account: str, marker: str) -> tuple[bytes, str]:
     token = f"body-token-{marker}"
     message = EmailMessage()
     message["Subject"] = f"[{MARKER_PREFIX}] {marker} — проверка кириллицы"
+    # Real mail always has one, and the post-move UID lookup matches on it:
+    # without it the plugin rightly reports no destination UIDs, and this
+    # suite would never exercise the mapping at all.
+    message["Message-ID"] = make_msgid(domain="hermes-yandex-mail.test")
     message["From"] = account
     message["To"] = account
     message.set_content(f"Plain body.\n{token}\n")
@@ -99,11 +104,27 @@ def planted(client, account):
     try:
         yield state
     finally:
-        with config.build_client() as cleanup:
+        _purge_everywhere(marker)
+
+
+def _purge_everywhere(marker: str) -> None:
+    """Erase every trace of one throwaway message, wherever it ended up.
+
+    Deliberately searches by marker instead of trusting the UID the test was
+    last holding: a test that fails midway through a move leaves the message
+    in a folder the tracked state does not name, and a cleanup that trusted
+    that state would both miss the message and raise a second error on top
+    of the real failure.
+    """
+    with config.build_client() as cleanup:
+        for folder in cleanup.list_folders():
             try:
-                cleanup.delete(state["folder"], [state["uid"]], permanent=True)
-            except MailError as exc:  # pragma: no cover - diagnostics only
-                pytest.fail(f"Could not clean up {state['folder']}/{state['uid']}: {exc}")
+                found = cleanup.search(folder.name, SearchQuery(text=marker), limit=50)
+                if found:
+                    cleanup.delete(folder.name, [m.uid for m in found], permanent=True)
+            except MailError:  # pragma: no cover - diagnostics only
+                # One unreadable folder must not stop the others being cleaned.
+                continue
 
 
 def test_folders_report_roles_and_counts(client):
@@ -158,7 +179,13 @@ def test_move_to_trash_then_purge(client, planted):
     assert trash, "the account has no Trash folder"
 
     result = client.delete("INBOX", [planted["uid"]], permanent=False)
-    assert result["method"] == "trash", result
+    # The real method the move used — "trash" was a hard-coded label that hid
+    # the copy+flagged case, where the original is left behind.
+    assert result["method"] in {"move", "copy+expunge"}, result
+    assert result["trash_folder"] == trash, result
+    # The soft delete reports where each message landed, so the next turn does
+    # not have to re-derive it (Yandex cannot search by Message-ID).
+    assert result["destination_uids"].get(planted["uid"]), result
 
     # The message keeps its identity but not its UID: find it again by subject.
     moved = _await_search(client, trash, planted["marker"], expect_found=True)

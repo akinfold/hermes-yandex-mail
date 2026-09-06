@@ -76,8 +76,16 @@ class FakeIMAP:
         capabilities: tuple[str, ...] = DEFAULT_CAPABILITIES,
         login_error: str | None = None,
         list_data: list[Any] | None = None,
+        existing_uids: set[str] | None = None,
     ) -> None:
         self.capabilities = capabilities
+        #: UIDs the mailbox actually holds. The client probes existence with a
+        #: bare ``UID FETCH <set> (UID)`` before it mutates anything (RFC 3501
+        #: §6.4.8 makes a non-existent UID a silent no-op, not an error), so a
+        #: fixture that answered that probe from a static script would let the
+        #: very bug this check exists for slip through. Set it to make a UID
+        #: vanish the way a message deleted in another client would.
+        self.existing_uids = {"5", "6", "8", "9"} if existing_uids is None else existing_uids
         self.calls: list[tuple[Any, ...]] = []
         self.login_error = login_error
         self.logged_out = False
@@ -94,6 +102,9 @@ class FakeIMAP:
             "MOVE": ("OK", [b"[COPYUID 1 8 12] Completed"]),
             "EXPUNGE": ("OK", [b"1"]),
             "APPEND": ("OK", [b"[APPENDUID 1469770579 42] APPEND completed"]),
+            # Read via conn.response(...) after a SELECT/EXAMINE, not a tagged
+            # command reply — but scripted the same way as everything else here.
+            "UIDNEXT": ("OK", [b"9"]),
         }
 
     # -- imaplib surface ----------------------------------------------------
@@ -125,16 +136,41 @@ class FakeIMAP:
 
     def uid(self, command: str, *args: Any) -> tuple[str, list]:
         self.calls.append(("uid", command.upper(), *args))
+        if command.upper() == "FETCH" and args[-1:] == ("(UID)",):
+            return "OK", self._existence_reply(str(args[0]))
         return self._reply(command.upper())
+
+    def _existence_reply(self, uid_set: str) -> list[Any]:
+        """What the server answers a bare ``UID FETCH <set> (UID)``: one line
+        per UID that exists, and simply nothing for the ones that do not."""
+        requested = [u for u in uid_set.split(",") if u]
+        return [
+            b"%d (UID %s)" % (index + 1, uid.encode())
+            for index, uid in enumerate(requested)
+            if uid in self.existing_uids
+        ]
 
     def append(self, mailbox: Any, flags: Any, date_time: Any, message: bytes) -> tuple[str, list]:
         self.calls.append(("append", mailbox, flags, date_time, message))
         return self._reply("APPEND")
 
+    def response(self, name: str) -> tuple[str, list]:
+        """Mimic imaplib.IMAP4.response: an untagged response captured after a
+        command, e.g. ``UIDVALIDITY`` after SELECT. Unscripted names come back
+        empty, the same as a server that did not send that response."""
+        self.calls.append(("response", name))
+        return self._reply(name)
+
     # -- scripting ----------------------------------------------------------
 
     def _reply(self, command: str) -> tuple[str, list]:
         reply = self.responses.get(command, ("OK", []))
+        if isinstance(reply, list) and reply:
+            # A queue of replies for successive calls to the same command —
+            # e.g. a move's pre- and post-move FETCH need different answers.
+            # Pop one per call; once only one is left, keep returning it, so
+            # a test does not have to predict exactly how many calls happen.
+            reply = reply[0] if len(reply) == 1 else reply.pop(0)
         if isinstance(reply, Exception):
             raise reply
         if callable(reply):

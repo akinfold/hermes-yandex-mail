@@ -22,11 +22,20 @@ _FOLDER_HINT = (
     "Folder name as returned by yandex_mail_list_folders (e.g. 'INBOX', 'Sent', 'Spam'). "
     "Omit for the default folder (INBOX)."
 )
+# Required on every UID-scoped tool (read/mark/move/delete): a UID is only meaningful
+# inside the folder it came from, and UID numbering is independent per folder — reusing
+# a folder name from an earlier turn can silently operate on a different message.
+_REQUIRED_FOLDER_HINT = (
+    "The folder the message is in, exactly as a previous result reported it (e.g. the "
+    "'folder' field from yandex_mail_search_messages or yandex_mail_read_message). Do not "
+    "guess or reuse a folder name from an earlier turn."
+)
 # A single string, not an array: strict function-calling validators reject union
 # item types, and one comma-separated field keeps batch operations expressible.
 _UID_HINT = (
-    "Message UID from yandex_mail_search_messages. Several may be given "
-    "comma-separated ('101,102'). A UID is only meaningful together with its folder."
+    "Message UID from a previous result, e.g. yandex_mail_search_messages. Several may be "
+    "given comma-separated ('101,102'). A UID is only meaningful together with the 'folder' "
+    "that same result reported for it — always pass both."
 )
 _DATE_HINT = "ISO 8601 date, e.g. '2026-07-25'."
 
@@ -81,6 +90,14 @@ SEARCH_SCHEMA: dict[str, Any] = {
                 "type": "integer",
                 "description": "How many of the newest matches to return (default 25, max 100).",
             },
+            "offset": {
+                "type": "integer",
+                "description": (
+                    "Skip this many of the newest matches before taking 'limit' — page "
+                    "through results, e.g. offset=25 for the page after the first 25. "
+                    "Check the previous result's 'total' to know whether another page exists."
+                ),
+            },
         },
         "required": [],
     },
@@ -96,8 +113,14 @@ READ_SCHEMA: dict[str, Any] = {
     "parameters": {
         "type": "object",
         "properties": {
-            "uid": {"type": "string", "description": "The UID of the message to read."},
-            "folder": {"type": "string", "description": _FOLDER_HINT},
+            "uid": {
+                "type": "string",
+                "description": (
+                    "The UID of the message to read, from a previous result. Must be paired "
+                    "with the 'folder' that result reported the UID in."
+                ),
+            },
+            "folder": {"type": "string", "description": _REQUIRED_FOLDER_HINT},
             "mark_read": {
                 "type": "boolean",
                 "description": "Mark the message as read while opening it (false by default).",
@@ -107,7 +130,7 @@ READ_SCHEMA: dict[str, Any] = {
                 "description": "Truncate the body to this many characters (default 20000).",
             },
         },
-        "required": ["uid"],
+        "required": ["uid", "folder"],
     },
 }
 
@@ -121,14 +144,14 @@ MARK_SCHEMA: dict[str, Any] = {
         "type": "object",
         "properties": {
             "uid": {"type": "string", "description": _UID_HINT},
-            "folder": {"type": "string", "description": _FOLDER_HINT},
+            "folder": {"type": "string", "description": _REQUIRED_FOLDER_HINT},
             "read": {"type": "boolean", "description": "true marks as read, false as unread."},
             "flagged": {
                 "type": "boolean",
                 "description": "true flags (stars) the message, false removes the flag.",
             },
         },
-        "required": ["uid"],
+        "required": ["uid", "folder"],
     },
 }
 
@@ -147,9 +170,12 @@ MOVE_SCHEMA: dict[str, Any] = {
                 "type": "string",
                 "description": "Destination folder name, from yandex_mail_list_folders.",
             },
-            "folder": {"type": "string", "description": f"Source folder. {_FOLDER_HINT}"},
+            "folder": {
+                "type": "string",
+                "description": f"Source folder — {_REQUIRED_FOLDER_HINT}",
+            },
         },
-        "required": ["uid", "destination"],
+        "required": ["uid", "destination", "folder"],
     },
 }
 
@@ -163,7 +189,7 @@ DELETE_SCHEMA: dict[str, Any] = {
         "type": "object",
         "properties": {
             "uid": {"type": "string", "description": _UID_HINT},
-            "folder": {"type": "string", "description": _FOLDER_HINT},
+            "folder": {"type": "string", "description": _REQUIRED_FOLDER_HINT},
             "permanent": {
                 "type": "boolean",
                 "description": (
@@ -171,7 +197,7 @@ DELETE_SCHEMA: dict[str, Any] = {
                 ),
             },
         },
-        "required": ["uid"],
+        "required": ["uid", "folder"],
     },
 }
 
@@ -200,7 +226,27 @@ def _uids(args: dict[str, Any]) -> list[str]:
     invalid = [u for u in uids if not u.isdigit()]
     if invalid:
         raise ValueError(f"Not a message UID: {', '.join(invalid)}. UIDs are numbers.")
-    return uids
+    # De-duplicated, order preserved: a model that repeats a UID should not
+    # make the plugin send "UID STORE 8,8" or count one message twice in a
+    # result that reports what was acted on.
+    return list(dict.fromkeys(uids))
+
+
+def _required_folder(args: dict[str, Any]) -> str:
+    """The ``folder`` argument, required for anything UID-scoped.
+
+    A UID is only meaningful together with the folder it came from — UID
+    numbering is independent per folder on this server. The schema already
+    marks ``folder`` required, but a caller can still omit it; this is the
+    belt-and-suspenders check that turns an omission into a clear error
+    instead of silently landing on the default folder.
+    """
+    folder = str(args.get("folder") or "").strip()
+    if not folder:
+        raise ValueError(
+            "'folder' is required: pass back the exact folder name the previous result reported."
+        )
+    return folder
 
 
 def _int_arg(args: dict[str, Any], name: str, default: int, maximum: int | None = None) -> int:
@@ -275,14 +321,17 @@ def handle_list_folders(args: dict[str, Any], **_kwargs: Any) -> str:
 def handle_search(args: dict[str, Any], **_kwargs: Any) -> str:
     try:
         limit = _int_arg(args, "limit", _DEFAULT_LIMIT, _MAX_LIMIT)
+        offset = _int_arg(args, "offset", 0)
         with build_client() as client:
-            folder = client.check_folder(args.get("folder"))
-            messages = client.search(folder, _query_from_args(args), limit=limit)
+            folder = client.resolve_folder(client.check_folder(args.get("folder")))
+            result = client.search(folder, _query_from_args(args), limit=limit, offset=offset)
         return _dump(
             {
                 "folder": folder,
-                "count": len(messages),
-                "messages": [_summary_to_dict(m) for m in messages],
+                "offset": offset,
+                "count": len(result),
+                "total": result.total,
+                "messages": [_summary_to_dict(m) for m in result],
             }
         )
     except MissingCredentials as exc:
@@ -293,17 +342,28 @@ def handle_search(args: dict[str, Any], **_kwargs: Any) -> str:
         return _error(f"Unexpected error searching messages: {exc}")
 
 
-def _read_payload(client: YandexIMAPClient, folder: str, args: dict[str, Any]) -> dict[str, Any]:
-    uid = _uids(args)[0]
+def _read_payload(
+    client: YandexIMAPClient, folder: str, uid: str, args: dict[str, Any]
+) -> dict[str, Any]:
     max_chars = _int_arg(args, "max_chars", _DEFAULT_MAX_CHARS)
     raw, flags = client.fetch_message(folder, uid, mark_seen=bool(args.get("mark_read")))
     parsed = parse_message_bytes(raw)
     body = extract_body(parsed, max_chars=max_chars)
+    # The summary is fetched AFTER the body, so — unlike the body-fetch flags — it
+    # reflects a mark_read=true change. Prefer it, and fall back to the body-fetch
+    # flags only when the message could not be re-summarised (e.g. it vanished
+    # between the two fetches), so 'unread' and 'flags' always describe the same
+    # snapshot instead of two different ones.
     summary = client.summary(folder, uid)
-    payload: dict[str, Any] = (
-        _summary_to_dict(summary) if summary else {"uid": uid, "folder": folder}
-    )
-    payload["flags"] = list(flags) or payload.get("flags", [])
+    if summary:
+        payload: dict[str, Any] = _summary_to_dict(summary)
+    else:
+        payload = {
+            "uid": uid,
+            "folder": folder,
+            "unread": "\\Seen" not in flags,
+            "flags": list(flags),
+        }
     payload["body"] = body.text
     payload["body_from_html"] = body.is_html
     payload["truncated"] = body.truncated
@@ -316,9 +376,11 @@ def _read_payload(client: YandexIMAPClient, folder: str, args: dict[str, Any]) -
 
 def handle_read(args: dict[str, Any], **_kwargs: Any) -> str:
     try:
+        uid = _uids(args)[0]
+        folder_arg = _required_folder(args)
         with build_client() as client:
-            folder = client.check_folder(args.get("folder"))
-            return _dump({"message": _read_payload(client, folder, args)})
+            folder = client.resolve_folder(client.check_folder(folder_arg))
+            return _dump({"message": _read_payload(client, folder, uid, args)})
     except MissingCredentials as exc:
         return _error(str(exc))
     except (MailError, ValueError) as exc:
@@ -341,11 +403,12 @@ def _flag_changes(args: dict[str, Any]) -> tuple[list[str], list[str]]:
 def handle_mark(args: dict[str, Any], **_kwargs: Any) -> str:
     try:
         uids = _uids(args)
+        folder_arg = _required_folder(args)
         add, remove = _flag_changes(args)
         if not add and not remove:
             return _error("Nothing to change: provide 'read' and/or 'flagged'.")
         with build_client() as client:
-            folder = client.check_folder(args.get("folder"))
+            folder = client.resolve_folder(client.check_folder(folder_arg))
             client.store_flags(folder, uids, add=add, remove=remove)
         return _dump(
             {"marked": True, "folder": folder, "uids": uids, "added": add, "removed": remove}
@@ -364,11 +427,25 @@ def handle_move(args: dict[str, Any], **_kwargs: Any) -> str:
         destination = str(args.get("destination") or "").strip()
         if not destination:
             return _error("'destination' is required.")
+        folder_arg = _required_folder(args)
         with build_client() as client:
-            folder = client.check_folder(args.get("folder"))
-            target = client.check_folder(destination)
-            method = client.move(folder, uids, target)
-        return _dump({"moved": True, "uids": uids, "from": folder, "to": target, "method": method})
+            folder = client.resolve_folder(client.check_folder(folder_arg))
+            target = client.resolve_folder(client.check_folder(destination))
+            result = client.move(folder, uids, target)
+        return _dump(
+            {
+                "moved": True,
+                "uids": uids,
+                "from": folder,
+                "to": target,
+                "method": result.method,
+                # The mapping itself, not list(...): that would emit the
+                # dict's KEYS — the source UIDs — under a name promising
+                # destination ones, which is exactly the wrong-identifier
+                # bug this field exists to prevent.
+                "destination_uids": dict(result.destination_uids),
+            }
+        )
     except MissingCredentials as exc:
         return _error(str(exc))
     except (MailError, ValueError) as exc:
@@ -380,8 +457,9 @@ def handle_move(args: dict[str, Any], **_kwargs: Any) -> str:
 def handle_delete(args: dict[str, Any], **_kwargs: Any) -> str:
     try:
         uids = _uids(args)
+        folder_arg = _required_folder(args)
         with build_client() as client:
-            folder = client.check_folder(args.get("folder"))
+            folder = client.resolve_folder(client.check_folder(folder_arg))
             result = client.delete(folder, uids, permanent=bool(args.get("permanent")))
         return _dump({**result, "uids": uids, "folder": folder})
     except MissingCredentials as exc:
