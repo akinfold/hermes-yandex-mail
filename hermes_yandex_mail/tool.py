@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .config import MissingCredentials, build_client
+from .config import MissingCredentials, PermissionDenied, build_client, require_action
 from .imap import Folder, MailError, MessageSummary, SearchQuery, YandexIMAPClient
 from .message import extract_body, parse_message_bytes
 
@@ -184,7 +184,8 @@ DELETE_SCHEMA: dict[str, Any] = {
     "name": "yandex_mail_delete_message",
     "description": (
         "Delete one or more messages. By default they are moved to the Trash folder and can "
-        "still be recovered; pass permanent=true to erase them irreversibly."
+        "still be recovered. A message already in Trash is left untouched. Erasing a message "
+        "permanently is a separate, irreversible action."
     ),
     "parameters": {
         "type": "object",
@@ -208,6 +209,7 @@ DELETE_SCHEMA: dict[str, Any] = {
 _DEFAULT_LIMIT = 25
 _MAX_LIMIT = 100
 _DEFAULT_MAX_CHARS = 20000
+_MAX_CHARS = 100000
 
 
 def _error(message: str) -> str:
@@ -216,6 +218,19 @@ def _error(message: str) -> str:
 
 def _dump(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False)
+
+
+def with_action_guard(action: str, handler: Any) -> Any:
+    """Recheck a registered tool's permission immediately before each call."""
+
+    def guarded(args: dict[str, Any], **kwargs: Any) -> str:
+        try:
+            require_action(action)
+        except PermissionDenied as exc:
+            return _error(str(exc))
+        return handler(args, **kwargs)
+
+    return guarded
 
 
 def _uids(args: dict[str, Any]) -> list[str]:
@@ -348,7 +363,7 @@ def handle_search(args: dict[str, Any], **_kwargs: Any) -> str:
 def _read_payload(
     client: YandexIMAPClient, folder: str, uid: str, args: dict[str, Any]
 ) -> dict[str, Any]:
-    max_chars = _int_arg(args, "max_chars", _DEFAULT_MAX_CHARS)
+    max_chars = _int_arg(args, "max_chars", _DEFAULT_MAX_CHARS, _MAX_CHARS)
     raw, flags = client.fetch_message(folder, uid, mark_seen=bool(args.get("mark_read")))
     parsed = parse_message_bytes(raw)
     body = extract_body(parsed, max_chars=max_chars)
@@ -381,12 +396,14 @@ def handle_read(args: dict[str, Any], **_kwargs: Any) -> str:
     try:
         uid = _uids(args)[0]
         folder_arg = _required_folder(args)
+        if args.get("mark_read"):
+            require_action("mark_message")
         with build_client() as client:
             folder = client.resolve_folder(client.check_folder(folder_arg))
             return _dump({"message": _read_payload(client, folder, uid, args)})
     except MissingCredentials as exc:
         return _error(str(exc))
-    except (MailError, ValueError) as exc:
+    except (MailError, PermissionDenied, ValueError) as exc:
         return _error(str(exc))
     except Exception as exc:
         return _error(f"Unexpected error reading message: {exc}")

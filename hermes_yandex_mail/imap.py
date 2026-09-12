@@ -51,6 +51,7 @@ __all__ = [
 DEFAULT_HOST = "imap.yandex.ru"
 DEFAULT_PORT = 993
 DEFAULT_FOLDER = "INBOX"
+_MAX_MESSAGE_BYTES = 10 * 1024 * 1024
 
 #: Seconds to wait on the connection and on every subsequent socket operation.
 #: Without it a stalled server hangs the tool call — and therefore the agent —
@@ -368,6 +369,8 @@ def _imap_date(value: str) -> str:
 
 def _quoted(value: str) -> bytes:
     """A SEARCH string argument: UTF-8 bytes, quoted and escaped."""
+    if any(control in value for control in ("\r", "\n", "\x00")):
+        raise MailError("Search values cannot contain CR, LF, or NUL control characters.")
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return b'"' + escaped.encode("utf-8") + b'"'
 
@@ -851,9 +854,14 @@ class YandexIMAPClient:
         """
         self._select(folder, readonly=not mark_seen)
         part = "BODY[]" if mark_seen else "BODY.PEEK[]"
-        data = self._uid("FETCH", "FETCH", uid, f"(UID FLAGS {part})")
+        data = self._uid("FETCH", "FETCH", uid, f"(UID FLAGS {part}<0.{_MAX_MESSAGE_BYTES + 1}>)")
         for info, raw in _iter_fetch_items(data):
             if _UID_RE.search(info):
+                if len(raw) > _MAX_MESSAGE_BYTES:
+                    raise MailError(
+                        f"Message {uid} exceeds the {_MAX_MESSAGE_BYTES // (1024 * 1024)} MiB "
+                        "raw read limit."
+                    )
                 return raw, _flags_of(info)
         raise MailError(f"Message {uid} not found in {folder}.")
 
@@ -1117,10 +1125,15 @@ class YandexIMAPClient:
             #
             # Claiming success here without acting was the original bug: the
             # message never moved, and the caller was told it was deleted.
-            raise MailError(
-                f"The message is already in the Trash folder ({trash!r}). Pass permanent=true "
-                "to erase it — moving it to Trash again would not do anything."
-            )
+            return {
+                "deleted": False,
+                "reason": "already_in_trash",
+                "folder": trash,
+                "note": (
+                    "The message is already in Trash and was left untouched. "
+                    "Erasing it permanently is a separate, irreversible action."
+                ),
+            }
         result = self._move_resolved(resolved_folder, uids, trash)
         return {
             # False when the original survived the move (copy+flagged): the

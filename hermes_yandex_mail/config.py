@@ -46,10 +46,12 @@ __all__ = [
     "ENV_PASSWORD",
     "ENV_PORT",
     "MissingCredentials",
+    "PermissionDenied",
     "allowed_actions",
     "allowed_folders",
     "build_client",
     "credentials_present",
+    "require_action",
 ]
 
 
@@ -69,8 +71,9 @@ def allowed_actions() -> frozenset[str]:
     are unaffected. Any other value is an explicit allow-list: names that match
     nothing are dropped rather than raising, so a typo can only ever withhold a
     tool, never grant one (a value naming nothing valid therefore allows
-    nothing). Tools are filtered at registration time, so Hermes must be
-    restarted for a change to take effect.
+    nothing). Tools are filtered at registration time and permissions are
+    checked again by each handler. Restart Hermes after editing configuration
+    so its environment and registered toolset both reflect the change.
     """
     raw = get_provider_env(ENV_ACTIONS)
     if not raw.strip():
@@ -87,6 +90,16 @@ def allowed_actions() -> frozenset[str]:
 
 class MissingCredentials(RuntimeError):
     """Raised when required Yandex credentials are absent from the environment."""
+
+
+class PermissionDenied(RuntimeError):
+    """Raised when deployment configuration forbids an action."""
+
+
+def require_action(action: str) -> None:
+    """Recheck deployment permissions before a tool performs an operation."""
+    if action not in allowed_actions():
+        raise PermissionDenied(f"Action {action!r} is not allowed by {ENV_ACTIONS}.")
 
 
 def credentials_present() -> bool:

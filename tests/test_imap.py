@@ -676,17 +676,20 @@ def test_delete_to_trash_still_reports_destination_uids_under_an_allow_list(fake
     assert result["destination_uids"] == {"8": "13"}
 
 
-def test_delete_from_trash_refuses_to_silently_no_op(fake_imap):
+def test_delete_from_trash_reports_an_accurate_no_op(fake_imap):
     # This was the bug: deleting from Trash without permanent=True used to
     # return {"deleted": True, ...} while sending no command at all.
-    with make_client(fake_imap) as client, pytest.raises(MailError, match="already in the Trash"):
-        client.delete("Trash", ["8"])
+    with make_client(fake_imap) as client:
+        result = client.delete("Trash", ["8"])
+    assert result["deleted"] is False
+    assert result["reason"] == "already_in_trash"
     assert fake_imap.command_names() == []
 
 
 def test_delete_from_trash_is_detected_regardless_of_case(fake_imap):
-    with make_client(fake_imap) as client, pytest.raises(MailError, match="already in the Trash"):
-        client.delete("trash", ["8"])
+    with make_client(fake_imap) as client:
+        result = client.delete("trash", ["8"])
+    assert result["deleted"] is False
     assert fake_imap.command_names() == []
 
 

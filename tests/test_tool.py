@@ -538,5 +538,7 @@ def test_a_model_that_omits_folder_gets_a_clear_error_never_a_silent_inbox(imap,
 
 def test_delete_on_a_message_already_in_trash_sends_nothing_destructive(imap):
     result = call(tool.handle_delete, uid="8", folder="Trash")
-    assert "already in the Trash" in result["error"]
+    assert result["deleted"] is False
+    assert result["reason"] == "already_in_trash"
+    assert "irreversible" in result["note"]
     assert imap.command_names() == []
