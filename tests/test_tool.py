@@ -381,6 +381,7 @@ HANDLERS = [
     (tool.handle_list_folders, {}),
     (tool.handle_search, {}),
     (tool.handle_read, {"uid": "8", "folder": "INBOX"}),
+    (tool.handle_read_attachment, {"uid": "8", "folder": "INBOX", "part_id": "2"}),
     (tool.handle_mark, {"uid": "8", "folder": "INBOX", "read": True}),
     (tool.handle_move, {"uid": "8", "folder": "INBOX", "destination": "Trash"}),
     (tool.handle_delete, {"uid": "8", "folder": "INBOX"}),

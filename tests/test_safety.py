@@ -58,6 +58,10 @@ def test_registered_reader_cannot_mark_seen_without_permission(monkeypatch):
         ("yandex_mail_list_folders", {}),
         ("yandex_mail_search_messages", {}),
         ("yandex_mail_read_message", {"uid": "8", "folder": "INBOX"}),
+        (
+            "yandex_mail_read_attachment",
+            {"uid": "8", "folder": "INBOX", "part_id": "2"},
+        ),
         ("yandex_mail_mark_message", {"uid": "8", "folder": "INBOX", "read": True}),
         (
             "yandex_mail_move_message",

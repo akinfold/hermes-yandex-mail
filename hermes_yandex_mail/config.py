@@ -21,6 +21,7 @@ ACTIONS: tuple[str, ...] = (
     "list_folders",
     "search_messages",
     "read_message",
+    "read_attachment",
     "mark_message",
     "move_message",
     "delete_message",
@@ -29,7 +30,7 @@ ACTIONS: tuple[str, ...] = (
 #: Shorthands accepted by ``YANDEX_MAIL_ACTIONS`` alongside single actions.
 ACTION_GROUPS: dict[str, frozenset[str]] = {
     "all": frozenset(ACTIONS),
-    "read": frozenset({"list_folders", "search_messages", "read_message"}),
+    "read": frozenset({"list_folders", "search_messages", "read_message", "read_attachment"}),
     "write": frozenset({"mark_message", "move_message"}),
     "delete": frozenset({"delete_message"}),
 }

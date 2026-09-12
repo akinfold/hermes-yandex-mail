@@ -37,13 +37,14 @@ def test_read_only_deployment(monkeypatch):
         "yandex_mail_list_folders",
         "yandex_mail_search_messages",
         "yandex_mail_read_message",
+        "yandex_mail_read_attachment",
     ]
 
 
 def test_everything_but_delete(monkeypatch):
     names = _register_with(monkeypatch, "read,write")
     assert "yandex_mail_delete_message" not in names
-    assert len(names) == 5
+    assert len(names) == 6
 
 
 def test_single_action(monkeypatch):
