@@ -16,6 +16,16 @@ def env(monkeypatch):
     return values
 
 
+def test_the_environment_variable_names_are_exact():
+    """The names are composed from a prefix (see config), so pin what they spell."""
+    assert config.ENV_LOGIN == "YANDEX_MAIL_LOGIN"
+    assert config.ENV_PASSWORD == "YANDEX_MAIL_APP_PASSWORD"
+    assert config.ENV_HOST == "YANDEX_MAIL_IMAP_HOST"
+    assert config.ENV_PORT == "YANDEX_MAIL_IMAP_PORT"
+    assert config.ENV_FOLDERS == "YANDEX_MAIL_FOLDERS"
+    assert config.ENV_ACTIONS == "YANDEX_MAIL_ACTIONS"
+
+
 def test_credentials_present(env):
     assert config.credentials_present() is False
     env[config.ENV_LOGIN] = "me@yandex.ru"
