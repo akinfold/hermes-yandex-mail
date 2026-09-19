@@ -9,6 +9,7 @@ every command so tests can assert on the wire traffic.
 from __future__ import annotations
 
 import imaplib
+import smtplib
 from typing import Any
 
 import pytest
@@ -210,3 +211,105 @@ class FakeIMAP:
 @pytest.fixture
 def fake_imap() -> FakeIMAP:
     return FakeIMAP()
+
+
+class FakeSMTPError(smtplib.SMTPServerDisconnected):
+    """What smtplib raises when the socket dies mid-conversation."""
+
+
+class FakeSMTP:
+    """A scriptable stand-in for :class:`smtplib.SMTP_SSL`.
+
+    Models the calls the client actually makes, one at a time, so the
+    pre-DATA / post-DATA distinction is decided by *where the bytes got to*
+    rather than by a phase label the test hands to the code. A fixture that
+    let the code declare which phase it was in would make those two tests
+    self-fulfilling: they would pass whichever branch the implementation took.
+    """
+
+    def __init__(
+        self,
+        *,
+        fail_at: str | None = None,
+        auth_error: bool = False,
+        mail_code: int = 250,
+        rcpt_codes: dict[str, tuple[int, bytes]] | None = None,
+        data_code: int = 354,
+        final_code: int = 250,
+    ) -> None:
+        #: "connect" | "mail" | "rcpt" | "data" | "write" | "final"
+        self.fail_at = fail_at
+        self.auth_error = auth_error
+        self.mail_code = mail_code
+        self.rcpt_codes = rcpt_codes or {}
+        self.data_code = data_code
+        self.final_code = final_code
+        self.calls: list[tuple[str, Any]] = []
+        self.written: bytes = b""
+        self._next_reply: tuple[int, bytes] | None = None
+
+    # -- connection ---------------------------------------------------------
+
+    def ehlo_or_helo_if_needed(self) -> None:
+        self.calls.append(("ehlo", None))
+
+    def login(self, user: str, password: str) -> None:
+        self.calls.append(("login", user))
+        if self.auth_error:
+            raise smtplib.SMTPAuthenticationError(535, b"5.7.8 Error: authentication failed")
+
+    def quit(self) -> None:
+        self.calls.append(("quit", None))
+
+    def rset(self) -> None:
+        self.calls.append(("rset", None))
+
+    # -- transaction --------------------------------------------------------
+
+    def mail(self, sender: str, options: Any = ()) -> tuple[int, bytes]:
+        self.calls.append(("mail", sender))
+        if self.fail_at == "mail":
+            raise FakeSMTPError("Server not connected")
+        return self.mail_code, b"2.1.0 Ok"
+
+    def rcpt(self, address: str, options: Any = ()) -> tuple[int, bytes]:
+        self.calls.append(("rcpt", address))
+        if self.fail_at == "rcpt":
+            raise FakeSMTPError("Server not connected")
+        return self.rcpt_codes.get(address, (250, b"2.1.5 Ok"))
+
+    def putcmd(self, cmd: str, args: str = "") -> None:
+        self.calls.append(("putcmd", cmd))
+        if self.fail_at == "data":
+            self._next_reply = (451, b"4.3.0 Temporary failure")
+        else:
+            self._next_reply = (self.data_code, b"2.0.0 End data with <CR><LF>.<CR><LF>")
+
+    def getreply(self) -> tuple[int, bytes]:
+        reply, self._next_reply = self._next_reply, None
+        if reply is not None:
+            self.calls.append(("getreply", reply[0]))
+            return reply
+        # The closing reply, after the payload.
+        if self.fail_at == "final":
+            raise FakeSMTPError("Server not connected")
+        self.calls.append(("getreply", self.final_code))
+        return self.final_code, b"2.0.0 Ok: queued"
+
+    def send(self, payload: bytes) -> None:
+        self.calls.append(("send", len(payload)))
+        if self.fail_at == "write":
+            # Half the payload reached the socket: this is the case where the
+            # message may or may not have been delivered.
+            self.written = payload[: len(payload) // 2]
+            raise FakeSMTPError("Server not connected")
+        self.written = payload
+
+    @property
+    def command_names(self) -> list[str]:
+        return [name for name, _ in self.calls]
+
+
+@pytest.fixture
+def fake_smtp() -> FakeSMTP:
+    return FakeSMTP()

@@ -20,14 +20,21 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_DIR = REPO_ROOT / "hermes_yandex_mail"
 
-EXPECTED_TOOLS = {
+#: Every tool the manifest advertises.
+MANIFEST_TOOLS = {
     "yandex_mail_list_folders",
     "yandex_mail_search_messages",
     "yandex_mail_read_message",
     "yandex_mail_mark_message",
     "yandex_mail_move_message",
     "yandex_mail_delete_message",
+    "yandex_mail_send_message",
 }
+
+#: What an unconfigured deployment actually gets. Deliberately NOT the same
+#: set: sending is opt-in, so it is advertised but not registered until
+#: YANDEX_MAIL_ACTIONS names it.
+DEFAULT_REGISTERED_TOOLS = MANIFEST_TOOLS - {"yandex_mail_send_message"}
 
 
 class FakeCtx:
@@ -56,12 +63,17 @@ def _load_as_hermes_would():
     return module
 
 
-def test_directory_loader_registers_tools():
+def test_directory_loader_registers_tools(monkeypatch):
+    # Pin the environment: an unset YANDEX_MAIL_ACTIONS falls through to
+    # ~/.hermes/.env, so on a developer machine that happens to enable sending
+    # this would otherwise assert against whatever that file says. "all" is the
+    # value under test anyway — it must not include send_message.
+    monkeypatch.setenv("YANDEX_MAIL_ACTIONS", "all")
     module = _load_as_hermes_would()
     ctx = FakeCtx()
     module.register(ctx)
 
-    assert {t["name"] for t in ctx.tools} == EXPECTED_TOOLS
+    assert {t["name"] for t in ctx.tools} == DEFAULT_REGISTERED_TOOLS
     for t in ctx.tools:
         assert t["toolset"] == "yandex_mail"
         assert callable(t["handler"])
@@ -74,7 +86,7 @@ def test_manifest_matches_the_code():
     assert manifest["name"] == "yandex_mail"
     assert manifest["kind"] == "standalone"
     assert str(manifest["version"]) == module.__version__
-    assert set(manifest["provides_tools"]) == EXPECTED_TOOLS
+    assert set(manifest["provides_tools"]) == MANIFEST_TOOLS
     assert [entry["key"] for entry in manifest["requires_env"]] == [
         "YANDEX_MAIL_LOGIN",
         "YANDEX_MAIL_APP_PASSWORD",
@@ -89,3 +101,14 @@ def test_the_three_version_files_agree():
     version = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
     manifest = yaml.safe_load((PLUGIN_DIR / "plugin.yaml").read_text(encoding="utf-8"))
     assert version == _load_as_hermes_would().__version__ == str(manifest["version"])
+
+
+def test_sending_is_advertised_but_not_registered_by_default():
+    """The one action a fresh install does not get.
+
+    Stated here as its own assertion rather than left implicit in the two sets
+    above, because it is the property an upgrade must not quietly change:
+    installing 0.3.0 over 0.2.x must not hand a running agent the ability to
+    write as the account owner.
+    """
+    assert set(MANIFEST_TOOLS - DEFAULT_REGISTERED_TOOLS) == {"yandex_mail_send_message"}

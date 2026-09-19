@@ -13,8 +13,12 @@ Yandex inbox.** *"What came in overnight?"* — *"Read me the one from the bank.
 *"File everything from GitHub into Archive and mark it read."* The agent works on
 your real mailbox, over IMAP, with no third-party service in the middle.
 
-- 📬 **Six tools, one toolset** — list folders with unread counts, search, read
-  (body plus attachment inventory), flag, move, delete.
+- 📬 **Seven tools, one toolset** — list folders with unread counts, search, read
+  (body plus attachment inventory), flag, move, delete, and — only if you switch
+  it on — send.
+- ✉️ **Sending is off until you name it** — `send_message` is not in `all` and not
+  granted by leaving the allow-list empty, so upgrading never hands a running
+  agent the ability to write as you.
 - 🔒 **You choose what it may touch** — restrict it to specific folders, and to
   specific actions (`read`, `read,write`, …). A disallowed action is not in the
   toolset at all, so the model cannot be talked into calling it.
@@ -29,7 +33,7 @@ your real mailbox, over IMAP, with no third-party service in the middle.
 - 🔑 **App password, not your account password** — scoped to mail, revocable in
   one click.
 
-Tested against Hermes **0.19.x**, Python **3.11–3.13**.
+Tested against Hermes **0.19.x–0.21.x**, Python **3.11–3.13**.
 
 ## Quick start
 
@@ -61,7 +65,7 @@ That's it. Ask the agent *"anything unread in my inbox?"* and it will tell you.
 
 ## The tools
 
-Up to six standalone tools, in the `yandex_mail` toolset:
+Up to seven standalone tools, in the `yandex_mail` toolset:
 
 | Tool | Purpose |
 |---|---|
@@ -71,6 +75,7 @@ Up to six standalone tools, in the `yandex_mail` toolset:
 | `yandex_mail_mark_message` | Mark messages read/unread and flagged/unflagged. |
 | `yandex_mail_move_message` | Move messages to another folder, reporting which UID each message was verified to have on arrival. |
 | `yandex_mail_delete_message` | Delete messages — to Trash by default. A message already there is left untouched; permanent deletion is a separate, irreversible request. |
+| `yandex_mail_send_message` | **Off by default.** Send a plain-text message, optionally threaded as a reply. Files a copy in Sent and reports exactly which recipients the server accepted. |
 
 Yandex Mail has no public REST API, so this plugin speaks **IMAP**
 (`imap.yandex.ru:993`) directly — the same protocol Yandex documents for mail
@@ -88,9 +93,8 @@ Folder names are matched generously on the way in — `spam`, `Spam`, `junk` and
 `Корзина` all resolve to the right mailbox — because IMAP itself is
 case-sensitive and would simply answer *"No such folder"*.
 
-**This plugin does not send mail.** IMAP reads and organises an existing mailbox;
-sending is SMTP, which is deliberately out of scope — the agent can triage your
-inbox but cannot mail anyone on your behalf.
+Sending goes over **SMTP** (`smtp.yandex.ru:465`) with the same app password, and
+is off unless you switch it on — see [Sending mail](#sending-mail).
 
 ## Configuration
 
@@ -101,7 +105,10 @@ inbox but cannot mail anyone on your behalf.
 | `YANDEX_MAIL_IMAP_HOST` | no | `imap.yandex.ru` | Override for a Yandex 360 domain or for testing. |
 | `YANDEX_MAIL_IMAP_PORT` | no | `993` | IMAP over TLS. |
 | `YANDEX_MAIL_FOLDERS` | no | *(all)* | Comma-separated allow-list of folders, e.g. `INBOX,Sent`. The first is the default folder. |
-| `YANDEX_MAIL_ACTIONS` | no | *(all)* | Comma-separated allow-list of actions the agent may perform — see below. |
+| `YANDEX_MAIL_ACTIONS` | no | *(all but sending)* | Comma-separated allow-list of actions the agent may perform — see below. |
+| `YANDEX_MAIL_SMTP_HOST` | no | `smtp.yandex.ru` | Override for a Yandex 360 domain or for testing. |
+| `YANDEX_MAIL_SMTP_PORT` | no | `465` | SMTP over implicit TLS. |
+| `YANDEX_MAIL_SEND_TO` | no | *(any address)* | Comma-separated fence on who may be written to: full addresses, or `@domain` for a whole domain. |
 
 Credentials are read from the environment first, then from `~/.hermes/.env`, so
 they work in gateway and subprocess runs. Secret values are never logged.
@@ -112,13 +119,13 @@ and decoded for you.
 
 ### Restricting what the agent can do
 
-`YANDEX_MAIL_ACTIONS` decides which of the six tools are registered at all. A
+`YANDEX_MAIL_ACTIONS` decides which of the seven tools are registered at all. A
 disallowed action is not merely refused at call time: the tool never appears in
 the agent's toolset, so it cannot be invoked, and the model is not tempted to try.
 
 Accepted values, comma-separated and case-insensitive — individual actions
 (`list_folders`, `search_messages`, `read_message`, `mark_message`,
-`move_message`, `delete_message`), full tool names
+`move_message`, `delete_message`, `send_message`), full tool names
 (`yandex_mail_delete_message`), or the shorthands:
 
 | Shorthand | Expands to |
@@ -126,7 +133,7 @@ Accepted values, comma-separated and case-insensitive — individual actions
 | `read` | `list_folders`, `search_messages`, `read_message` |
 | `write` | `mark_message`, `move_message` |
 | `delete` | `delete_message` |
-| `all` | everything (the default) |
+| `all` | every action **except** `send_message` (the default) |
 
 ```dotenv
 # Read the mail, change nothing:
@@ -139,7 +146,20 @@ YANDEX_MAIL_ACTIONS=read,write
 YANDEX_MAIL_ACTIONS=list_folders,search_messages
 ```
 
-Leave it unset for all six tools. A name that matches nothing is ignored, so a
+Leave it unset for the six reading and organising tools. **Sending is the one
+exception to "unset means everything"**: `send_message` has to be named, either
+on its own or alongside a shorthand —
+
+```dotenv
+YANDEX_MAIL_ACTIONS=all,send_message
+```
+
+There is deliberately no short `send` spelling. A short word could already be
+sitting in somebody's configuration from before the action existed, where it was
+silently ignored; giving it meaning now would switch sending on by upgrading
+alone, which is precisely what this gate exists to prevent.
+
+A name that matches nothing is ignored, so a
 typo can only ever withhold a tool, never grant one — and a value that names
 nothing recognisable therefore registers nothing at all. Permissions are checked
 again when a registered tool runs, so a stale worker cannot retain access after
@@ -149,6 +169,82 @@ its visible toolset also reflects the change.
 Pair it with `YANDEX_MAIL_FOLDERS` to fence off the rest of the mailbox: with
 `YANDEX_MAIL_FOLDERS=INBOX`, every other folder is invisible and unusable — as a
 source *and* as a move destination.
+
+## Sending mail
+
+Sending is the one thing here that cannot be undone: the message leaves your
+mailbox and reaches the people named. Everything about the design follows from
+that.
+
+Switch it on, and decide who the agent may write to:
+
+```dotenv
+YANDEX_MAIL_ACTIONS=all,send_message
+
+# Optional, and worth setting: who may be written to at all.
+YANDEX_MAIL_SEND_TO=you@yandex.ru,@yourcompany.example
+```
+
+The fence is checked before a socket is opened. A full entry matches one
+mailbox (`@ya.ru` and `@yandex.ru` are understood to be the same account); an
+`@domain` entry matches that domain exactly — not its subdomains, and not a
+domain that merely ends with it. Set it to something unparseable and nothing is
+allowed through: a mistyped fence fails closed.
+
+**The rules the tool enforces, whatever it is asked to do:**
+
+- **You are always the sender.** `From` and the envelope sender are
+  `YANDEX_MAIL_LOGIN`. No argument can change them.
+- **Recipients are only ever what the caller states.** Replying threads a
+  message onto another one — it never takes an address from it. This matters:
+  `From`, `Reply-To`, `To` and `Cc` are all written by whoever sent you the
+  message, so deriving a reply's recipients from them would let a sender choose
+  where your reply goes.
+- **An address is an address, not a display name.** `Bob <bob@example.org>` is
+  refused; pass `bob@example.org`. A display name containing an `@` parses as a
+  second address, which is how a reply quietly acquires an extra recipient.
+- **A reply must name the message it answers.** `reply_to_uid`,
+  `reply_to_folder` and `reply_to_message_id` are required together. A UID
+  identifies a slot, not a message; comparing the `message_id` against what the
+  server reports now is what makes "reply to the message I read" mean that.
+- **Nothing gets to become a header.** A line break in a subject, a recipient or
+  a copied `Message-ID` is refused, not stripped.
+- **A copy is filed in Sent**, and the message being answered is flagged
+  `\Answered` if flagging is allowed. Neither can fail the send: once the
+  message has gone, the result says so and a bookkeeping problem is a note.
+
+**What the result tells you.** `sent`, the recipients the server actually
+accepted, anything it refused and why, and — on a reply — where each recipient
+stands in that thread:
+
+```json
+{
+  "sent": true,
+  "delivery": "confirmed",
+  "recipients": ["counterparty@example.org"],
+  "recipient_sources": {"counterparty@example.org": "from"},
+  "in_reply_to": "<original@example.org>",
+  "saved_to_sent": true,
+  "sent_folder": "Sent",
+  "marked_answered": true,
+  "notes": []
+}
+```
+
+`recipient_sources` is always present on a reply, and says whether each address
+sent the original (`from`), was among its `To` recipients (`to`), appeared only
+in its `Reply-To` (`reply_to_only`), or is new to the thread (`new`). The last
+two are worth reading: a message asking for replies at an address it was not
+sent from is the standard shape of a phishing redirect, and the tool says so in
+`notes` rather than deciding for you.
+
+`delivery` is `unconfirmed` when the message went out but the server never
+acknowledged it. That is not a failure and must not be retried — sending again
+would deliver a second copy. Anything that goes wrong *before* the message is
+written says "Nothing was sent" and is safe to try again.
+
+Plain text only: no HTML, no attachments, at most 10 recipients and 100 000
+characters per message.
 
 ## Enabling IMAP in Yandex Mail
 
@@ -196,6 +292,10 @@ is off, or the app password lacks the Mail scope.
   [Security](#security).)*
 - **Attachments are listed, not downloaded** — name, MIME type, and size. The
   body is capped (20 000 characters by default) and says when it was truncated.
+- **Yandex' SMTP does not advertise `SMTPUTF8`,** so an address with non-ASCII
+  characters in it cannot be sent to at all. It is refused with a sentence
+  saying why, rather than failing somewhere inside the standard library.
+  Subjects and display names in any language are fine.
 
 ## Installing the plugin into Hermes
 
@@ -232,9 +332,15 @@ pytest                       # unit tests, no network
 
 The `e2e`-marked tests hit a real Yandex mailbox and are deselected by default.
 They upload one throwaway message with a unique marker via IMAP `APPEND`, then
-search, read, flag, move, and erase it — so a successful run leaves nothing
-behind, and **nothing is ever sent to anyone**. Use a dedicated test mailbox all
-the same.
+search, read, flag, move, and erase it, and the cleanup sweeps until the server
+agrees nothing is left — so a successful run leaves the mailbox as it found it.
+
+Since 0.3.0 they also **really send**, which is the only way to test sending at
+all. Every message goes to the test account itself and nowhere else, held there
+by two independent guards: the suite sets `YANDEX_MAIL_SEND_TO` to that account,
+so the plugin's own fence refuses anything else before a socket opens, and the
+test process asserts the same thing again before each call. Use a dedicated test
+mailbox regardless.
 
 ### Locally
 

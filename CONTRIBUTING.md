@@ -22,6 +22,8 @@ hermes_yandex_mail/
   imap_utf7.py  # modified UTF-7 for mailbox names (RFC 3501), no Hermes imports
   message.py    # MIME parsing: headers, body selection, attachments, no Hermes imports
   imap.py       # the IMAP client for Yandex, no Hermes imports
+  compose.py    # builds an outgoing message and refuses unsafe addressing
+  smtp.py       # hand-driven SMTP submission, no Hermes imports
   config.py     # env -> client, folder allow-list, action allow-list
   _compat.py    # real-vs-shim host env helper
   tool.py       # tool schemas + handlers (JSON in, JSON string out)
@@ -34,7 +36,8 @@ tests/e2e/      # live tests against a real mailbox, marked `e2e`
 
 The plugin follows the Hermes plugin contract; a few of these are load-bearing:
 
-- **Layering.** Keep the domain modules (`imap.py`, `imap_utf7.py`, `message.py`)
+- **Layering.** Keep the domain modules (`imap.py`, `imap_utf7.py`, `message.py`,
+  `compose.py`, `smtp.py`)
   free of any `agent.*` imports so they stay unit-testable. The host-facing glue
   lives in `tool.py`, `config.py`, and `__init__.py`.
 - **Never raise across the boundary.** Tool handlers (`handle_*`) must always
@@ -44,6 +47,14 @@ The plugin follows the Hermes plugin contract; a few of these are load-bearing:
   expunging is always UID-scoped (`UID EXPUNGE`, so a bare `EXPUNGE` cannot take
   someone else's `\Deleted` messages with it), and deletion means "move to
   Trash" unless the caller explicitly asked for permanence.
+- **Never send as anybody else.** `From` and the envelope sender are
+  `YANDEX_MAIL_LOGIN`; no tool argument may influence either. Recipients come
+  only from what the caller passed — never from the message being replied to,
+  whose headers are written by whoever sent it.
+- **Never let a send be retried by accident.** Anything that fails before the
+  payload reaches the socket must say so plainly, and anything that fails after
+  it must report the message as sent. `smtp.py` drives the transaction by hand
+  for exactly this reason; `smtplib.send_message` cannot tell the two apart.
 - **Relative imports only** in `__init__.py` — the plugin loads as
   `hermes_plugins.yandex_mail`.
 - **Address comparison** goes through `imap.normalize_email` — Yandex treats

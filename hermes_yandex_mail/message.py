@@ -24,6 +24,7 @@ __all__ = [
     "Attachment",
     "MessageBody",
     "addresses",
+    "bare_addresses",
     "decode_header_value",
     "extract_body",
     "header_date_iso",
@@ -80,6 +81,20 @@ def addresses(raw: str | None) -> list[str]:
         elif addr or name:
             out.append(addr or name)
     return out
+
+
+def bare_addresses(raw: str | None) -> list[str]:
+    """Just the addr-specs from an address header, without display names.
+
+    :func:`addresses` renders ``Name <addr>`` for a human reader, which is the
+    wrong thing to hand back to a model that may copy it into an argument: a
+    display name containing an ``@`` parses as a second address. This is the
+    form to copy.
+    """
+    decoded = decode_header_value(raw)
+    if not decoded:
+        return []
+    return [addr for _name, addr in getaddresses([decoded]) if addr]
 
 
 def header_date_iso(raw: str | None) -> str:

@@ -27,9 +27,23 @@ def _register_with(monkeypatch, actions: str) -> list[str]:
     return [t["name"] for t in ctx.tools]
 
 
-def test_registers_every_tool_by_default(monkeypatch):
+def test_registers_every_tool_except_sending_by_default(monkeypatch):
     names = _register_with(monkeypatch, "")
-    assert names == [f"yandex_mail_{action}" for action in config.ACTIONS]
+    assert names == [
+        f"yandex_mail_{action}" for action in config.ACTIONS if action not in config.SENDING_ACTIONS
+    ]
+    assert "yandex_mail_send_message" not in names
+
+
+@pytest.mark.parametrize("actions", ["all,send_message", "send_message", "read,send_message"])
+def test_sending_appears_only_when_it_is_named(monkeypatch, actions):
+    assert "yandex_mail_send_message" in _register_with(monkeypatch, actions)
+
+
+def test_a_bare_send_token_registers_nothing(monkeypatch):
+    """Upgrading must not turn a previously-ignored word into a live grant."""
+    assert _register_with(monkeypatch, "send") == []
+    assert "yandex_mail_send_message" not in _register_with(monkeypatch, "all,send")
 
 
 def test_read_only_deployment(monkeypatch):

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from ._compat import get_provider_env
 from .imap import DEFAULT_HOST, DEFAULT_PORT, YandexIMAPClient
+from .smtp import DEFAULT_SMTP_HOST, DEFAULT_SMTP_PORT, YandexSMTPClient
 
 #: Every variable this plugin reads is namespaced under one prefix, and the names
 #: are spelled through it rather than written out as whole literals. A constant
@@ -24,6 +25,9 @@ ENV_HOST = _ENV_PREFIX + "IMAP_HOST"
 ENV_PORT = _ENV_PREFIX + "IMAP_PORT"
 ENV_FOLDERS = _ENV_PREFIX + "FOLDERS"
 ENV_ACTIONS = _ENV_PREFIX + "ACTIONS"
+ENV_SMTP_HOST = _ENV_PREFIX + "SMTP_HOST"
+ENV_SMTP_PORT = _ENV_PREFIX + "SMTP_PORT"
+ENV_SEND_TO = _ENV_PREFIX + "SEND_TO"
 
 #: Every action the plugin can expose, in the order the tools are registered.
 ACTIONS: tuple[str, ...] = (
@@ -33,11 +37,27 @@ ACTIONS: tuple[str, ...] = (
     "mark_message",
     "move_message",
     "delete_message",
+    "send_message",
 )
+
+#: Actions an empty ``YANDEX_MAIL_ACTIONS`` does NOT grant, and that ``all``
+#: does not cover. Sending mail acts in the account owner's name and cannot be
+#: undone, so it is reached only by naming it: an upgrade must never hand an
+#: already-running agent the right to write as the user. The names accepted for
+#: it — ``send_message`` and ``yandex_mail_send_message`` — are ones nobody
+#: could already have in their configuration, because the action did not exist
+#: before 0.3.0. A short ``send`` shorthand is deliberately NOT offered: it was
+#: an unrecognised token in earlier versions, silently dropped, so anyone who
+#: had optimistically written it would have found sending switched on by the
+#: upgrade alone.
+SENDING_ACTIONS: frozenset[str] = frozenset({"send_message"})
+
+#: What "everything" means: every action except the sending ones.
+DEFAULT_ACTIONS: frozenset[str] = frozenset(ACTIONS) - SENDING_ACTIONS
 
 #: Shorthands accepted by ``YANDEX_MAIL_ACTIONS`` alongside single actions.
 ACTION_GROUPS: dict[str, frozenset[str]] = {
-    "all": frozenset(ACTIONS),
+    "all": DEFAULT_ACTIONS,
     "read": frozenset({"list_folders", "search_messages", "read_message"}),
     "write": frozenset({"mark_message", "move_message"}),
     "delete": frozenset({"delete_message"}),
@@ -54,11 +74,17 @@ __all__ = [
     "ENV_LOGIN",
     "ENV_PASSWORD",
     "ENV_PORT",
+    "ENV_SEND_TO",
+    "ENV_SMTP_HOST",
+    "ENV_SMTP_PORT",
     "MissingCredentials",
     "PermissionDenied",
+    "account_address",
     "allowed_actions",
     "allowed_folders",
+    "allowed_send_recipients",
     "build_client",
+    "build_smtp_client",
     "credentials_present",
     "require_action",
 ]
@@ -86,7 +112,7 @@ def allowed_actions() -> frozenset[str]:
     """
     raw = get_provider_env(ENV_ACTIONS)
     if not raw.strip():
-        return frozenset(ACTIONS)
+        return DEFAULT_ACTIONS
     allowed: set[str] = set()
     for item in raw.split(","):
         key = item.strip().lower().replace("-", "_").removeprefix(_TOOL_PREFIX)
@@ -116,16 +142,42 @@ def credentials_present() -> bool:
     return bool(get_provider_env(ENV_LOGIN) and get_provider_env(ENV_PASSWORD))
 
 
-def _port() -> int:
-    raw = get_provider_env(ENV_PORT)
+def allowed_send_recipients() -> list[str] | None:
+    """The addresses sending is fenced to, or ``None`` when no fence is set.
+
+    An entry is either a full address (one mailbox, compared through
+    :func:`normalize_email`) or ``@domain`` (that domain and no other). A value
+    that is set but yields no usable entry returns an empty list, which refuses
+    every recipient: a mistyped fence must fail closed, because the one thing
+    it exists to prevent is mail leaving for an address nobody intended.
+    """
+    raw = get_provider_env(ENV_SEND_TO).strip()
+    if not raw:
+        return None
+    entries = [item.strip() for item in raw.split(",")]
+    return [entry for entry in entries if _is_fence_entry(entry)]
+
+
+def _is_fence_entry(entry: str) -> bool:
+    """A usable ``YANDEX_MAIL_SEND_TO`` entry: one address, or one ``@domain``."""
+    if entry.startswith("@"):
+        return "." in entry[1:]
+    return "@" in entry
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = get_provider_env(name)
     try:
-        return int(raw) if raw else DEFAULT_PORT
+        return int(raw) if raw else default
     except ValueError:
-        return DEFAULT_PORT
+        return default
 
 
-def build_client() -> YandexIMAPClient:
-    """Construct a :class:`YandexIMAPClient` from environment credentials."""
+def _port() -> int:
+    return _int_env(ENV_PORT, DEFAULT_PORT)
+
+
+def _credentials() -> tuple[str, str]:
     login = get_provider_env(ENV_LOGIN)
     password = get_provider_env(ENV_PASSWORD)
     if not login or not password:
@@ -133,6 +185,36 @@ def build_client() -> YandexIMAPClient:
             f"{ENV_LOGIN} and {ENV_PASSWORD} must be set (create an app password with the "
             "Mail (IMAP) scope at https://id.yandex.ru/security/app-passwords)."
         )
+    return login, password
+
+
+def account_address() -> str:
+    """The address this plugin sends as — the configured login, and nothing else.
+
+    A separate accessor rather than a tool argument on purpose: the sender is
+    the one part of an outgoing message that no caller may influence.
+    """
+    return _credentials()[0]
+
+
+def build_smtp_client() -> YandexSMTPClient:
+    """Construct a :class:`YandexSMTPClient` from the same credentials.
+
+    The app password with the Mail scope authenticates SMTP as well as IMAP —
+    verified against the live server — so sending needs no second secret.
+    """
+    login, password = _credentials()
+    return YandexSMTPClient(
+        login=login,
+        password=password,
+        host=get_provider_env(ENV_SMTP_HOST) or DEFAULT_SMTP_HOST,
+        port=_int_env(ENV_SMTP_PORT, DEFAULT_SMTP_PORT),
+    )
+
+
+def build_client() -> YandexIMAPClient:
+    """Construct a :class:`YandexIMAPClient` from environment credentials."""
+    login, password = _credentials()
     return YandexIMAPClient(
         login=login,
         password=password,
