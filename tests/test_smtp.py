@@ -139,3 +139,30 @@ def test_the_default_connection_verifies_the_certificate_and_times_out(monkeypat
     assert context.verify_mode == ssl.CERT_REQUIRED
     assert context.check_hostname is True
     assert captured["timeout"] == smtp_module.DEFAULT_TIMEOUT
+
+
+def test_a_socket_error_during_the_envelope_is_nothing_sent(fake_smtp):
+    """A timeout surfaces as OSError, not as an smtplib exception."""
+
+    def timeout(_address, options=()):
+        raise TimeoutError("timed out")
+
+    fake_smtp.rcpt = timeout  # type: ignore[method-assign]
+    with client(fake_smtp) as smtp, pytest.raises(SendError, match="dropped before"):
+        smtp.send("me@yandex.ru", ["bob@example.org"], PAYLOAD)
+    assert fake_smtp.written == b""
+
+
+def test_one_connection_serves_the_whole_submission(fake_smtp):
+    smtp = client(fake_smtp)
+    assert smtp.connect() is smtp.connect()
+    assert fake_smtp.command_names.count("login") == 1
+    smtp.close()
+
+
+def test_a_drop_between_the_last_recipient_and_data_is_nothing_sent(fake_smtp):
+    """The exact boundary the 'written' flag exists to sit on."""
+    fake_smtp.fail_at = "putcmd"
+    with client(fake_smtp) as smtp, pytest.raises(SendError, match="dropped before"):
+        smtp.send("me@yandex.ru", ["bob@example.org"], PAYLOAD)
+    assert fake_smtp.written == b""

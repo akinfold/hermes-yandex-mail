@@ -9,6 +9,7 @@ report an error at all.
 
 from __future__ import annotations
 
+import base64
 import json
 
 import pytest
@@ -369,3 +370,131 @@ def test_a_cyrillic_body_and_subject_survive_the_wire(env, imap, smtp):
             message_id="<x@y.ru>",
         )
     )
+
+
+def test_a_reply_to_uid_that_is_not_a_number_is_refused(env, imap, smtp):
+    result = send(
+        to="bob@example.org",
+        body="b",
+        reply_to_uid="the one about invoices",
+        reply_to_folder="INBOX",
+        reply_to_message_id=ANCHOR_ID,
+    )
+    assert "not a message UID" in result["error"]
+    assert smtp.calls == []
+
+
+def test_a_reply_to_a_message_that_is_gone_is_refused(env, monkeypatch, smtp):
+    """Between reading a message and answering it, it can be moved or expunged."""
+    empty = FakeIMAP(existing_uids=set())
+    empty.responses["FETCH"] = ("OK", [])
+    monkeypatch.setattr(
+        tool,
+        "build_client",
+        lambda: YandexIMAPClient(
+            login=ACCOUNT, password="secret", connection_factory=lambda host, port: empty
+        ),
+    )
+    result = send(to="bob@example.org", body="b", **REPLY_ARGS)
+    assert "no longer in" in result["error"]
+    assert smtp.calls == []
+
+
+def test_a_result_that_cannot_be_assembled_still_reports_the_delivery(env, imap, smtp, monkeypatch):
+    """The last line of defence: the message is gone, so this cannot be an error."""
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("payload broke")
+
+    monkeypatch.setattr(tool, "_sent_payload", explode)
+    result = send(to="bob@example.org", subject="s", body="b")
+    assert "error" not in result, result
+    assert result["sent"] is True
+    assert result["recipients"] == ["bob@example.org"]
+    assert any("could not be built" in note for note in result["notes"])
+
+
+def test_enabling_sending_without_credentials_says_which_ones_are_missing(env, imap, smtp):
+    """Switching the action on before configuring the account is a real order of events."""
+    env.pop(config.ENV_LOGIN)
+    env.pop(config.ENV_PASSWORD)
+    result = send(to="bob@example.org", subject="s", body="b")
+    assert config.ENV_LOGIN in result["error"]
+    assert config.ENV_PASSWORD in result["error"]
+    assert smtp.calls == []
+
+
+# -- a hostile message being replied to -------------------------------------
+
+#: An original written entirely by an attacker: an RFC 2047 Subject that decodes
+#: to a header-injection attempt, a display name that is itself an address, a
+#: Reply-To pointing elsewhere, and a References chain with junk in it. Built as
+#: header bytes the server hands back, not as a handcrafted Python string, so the
+#: decode path is part of what is under test.
+HOSTILE_HEADERS = (
+    "Subject: =?utf-8?B?"
+    + base64.b64encode("Счёт\r\nBcc: collect@evil.example".encode()).decode()
+    + "?=\r\n"
+    'From: "me@victim.org" <attacker@evil.example>\r\n'
+    "Reply-To: audit@evil.example\r\n"
+    "To: me@yandex.ru\r\n"
+    "Cc: archive@evil.example\r\n"
+    "Message-ID: <hostile@evil.example>\r\n"
+    "References: <a@x.org> junk-not-an-id\r\n"
+    "\r\n"
+).encode()
+
+
+@pytest.fixture
+def hostile(monkeypatch) -> FakeIMAP:
+    fake = FakeIMAP()
+    fake.responses["FETCH"] = (
+        "OK",
+        [
+            (
+                b"1 (UID 8 RFC822.SIZE 100 BODY[HEADER.FIELDS (X)] {%d}" % len(HOSTILE_HEADERS),
+                HOSTILE_HEADERS,
+            ),
+            b")",
+        ],
+    )
+    monkeypatch.setattr(
+        tool,
+        "build_client",
+        lambda: YandexIMAPClient(
+            login=ACCOUNT, password="secret", connection_factory=lambda host, port: fake
+        ),
+    )
+    return fake
+
+
+HOSTILE_REPLY = {
+    "reply_to_uid": "8",
+    "reply_to_folder": "INBOX",
+    "reply_to_message_id": "<hostile@evil.example>",
+}
+
+
+def test_an_encoded_subject_that_decodes_to_a_header_is_refused(env, hostile, smtp):
+    result = send(to="bob@example.org", body="b", **HOSTILE_REPLY)
+    assert "line break" in result["error"]
+    assert smtp.calls == [], "nothing may reach the wire"
+    assert b"Bcc" not in smtp.written
+
+
+def test_the_attackers_reply_to_never_becomes_a_recipient(env, hostile, smtp):
+    """Even with a subject of its own, the reply goes only where it was told."""
+    result = send(to="bob@example.org", subject="Re: invoice", body="b", **HOSTILE_REPLY)
+    assert "error" not in result, result
+    assert [value for name, value in smtp.calls if name == "rcpt"] == ["bob@example.org"]
+    assert result["recipient_sources"] == {"bob@example.org": "new"}
+    assert any("bob@example.org" in note for note in result["notes"])
+    assert b"audit@evil.example" not in smtp.written
+    assert b"archive@evil.example" not in smtp.written
+
+
+def test_junk_in_the_originals_references_does_not_reach_the_reply(env, hostile, smtp):
+    send(to="bob@example.org", subject="Re: invoice", body="b", **HOSTILE_REPLY)
+    wire = smtp.written.decode()
+    assert "junk-not-an-id" not in wire
+    assert "References: <a@x.org> <hostile@evil.example>" in wire

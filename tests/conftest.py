@@ -237,7 +237,7 @@ class FakeSMTP:
         data_code: int = 354,
         final_code: int = 250,
     ) -> None:
-        #: "connect" | "mail" | "rcpt" | "data" | "write" | "final"
+        #: "connect" | "mail" | "rcpt" | "putcmd" | "data" | "write" | "final"
         self.fail_at = fail_at
         self.auth_error = auth_error
         self.mail_code = mail_code
@@ -280,6 +280,8 @@ class FakeSMTP:
 
     def putcmd(self, cmd: str, args: str = "") -> None:
         self.calls.append(("putcmd", cmd))
+        if self.fail_at == "putcmd":
+            raise FakeSMTPError("Server not connected")
         if self.fail_at == "data":
             self._next_reply = (451, b"4.3.0 Temporary failure")
         else:

@@ -255,3 +255,23 @@ def test_a_reply_carries_both_threading_headers():
     message = build(in_reply_to="<a@b.org>", references="<a@b.org>")
     assert message["In-Reply-To"] == "<a@b.org>"
     assert message["References"] == "<a@b.org>"
+
+
+def test_an_address_in_angle_brackets_is_accepted_without_its_wrapper():
+    """The one bracketed form that is still exactly one address."""
+    assert compose.parse_recipients("<bob@example.org>") == ["bob@example.org"]
+
+
+def test_an_empty_address_is_refused_rather_than_passed_on():
+    with pytest.raises(compose.ComposeError, match="empty"):
+        compose.validate_address("   ", "the sending address")
+
+
+def test_a_recipient_the_original_was_addressed_to_is_a_participant():
+    """The ``to`` branch: a reply-all to someone the original also went to."""
+    sources = compose.recipient_sources(
+        ["noreply@bank.example", "colleague@example.org"],
+        anchor(to=(ACCOUNT, "colleague@example.org")),
+        ACCOUNT,
+    )
+    assert sources == {"noreply@bank.example": "from", "colleague@example.org": "to"}
