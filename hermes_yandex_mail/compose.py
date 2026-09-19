@@ -23,6 +23,8 @@ attacker-authored text. Three of them carry the weight:
 from __future__ import annotations
 
 import re
+from email import policy
+from email.headerregistry import HeaderRegistry, UnstructuredHeader
 from email.message import EmailMessage
 from email.utils import formatdate
 
@@ -55,13 +57,56 @@ MAX_BODY_CHARS = 100_000
 #: matter — so keep the last few and drop the rest.
 MAX_REFERENCES = 20
 
-_CONTROL = ("\r", "\n", "\x00")
+#: Where a header ends, as Python itself decides it. ``policy.default`` splits
+#: on ``str.splitlines()``, which is CR and LF plus VT, FF, the file/group/record
+#: separators, NEL, U+2028 and U+2029 — so testing for CR and LF alone would
+#: leave the stdlib, not this module, deciding what a header break is.
+_NUL = "\x00"
 #: Characters that only ever appear in an address as structure, never inside a
 #: bare addr-spec: brackets and quotes delimit display names, parentheses start
 #: comments, and comma/colon/semicolon separate addresses and groups. Any of
 #: them left in a token means the token is not one plain address.
 _ADDRESS_STRUCTURE = set('<>,"();:\\[]')
-_MSG_ID_RE = re.compile(r"^<[^<>\s]{1,480}@[^<>\s]{1,480}>$")
+_ENCODED_WORD = "=?"
+#: Printable ASCII only, and no angle brackets inside. Anything else would be
+#: re-encoded on the way out (see :class:`_MessageIdHeader`) into something no
+#: client threads on, so it is refused rather than silently transformed.
+_ID_CHARS = r"[\x21-\x3b\x3d\x3f-\x7e]"
+_MSG_ID_RE = re.compile(rf"^<{_ID_CHARS}{{1,250}}@{_ID_CHARS}{{1,250}}>$")
+
+
+#: Where a folded header line is wrapped. Well under RFC 5322's 998-octet hard
+#: limit, and a single over-long id still fits on a line of its own.
+_FOLD_WIDTH = 78
+
+
+class _MessageIdHeader(UnstructuredHeader):
+    """``In-Reply-To`` / ``References``: ids emitted verbatim, folded between them.
+
+    ``policy.default`` classifies both as *unstructured* text, so its folder
+    RFC 2047-encodes any token it cannot fit on a line — and an ordinary Outlook
+    ``Message-ID`` is 81 characters. The reply then goes out carrying
+    ``In-Reply-To: =?utf-8?q?=3CAM0PR…?=``, which no mail client threads on,
+    while the tool reads the header back *decoded* and reports a correctly
+    threaded reply that was never sent. Folding only at the spaces between ids
+    is both legal and lossless: a References chain is a list, and the only place
+    it may be broken is between its elements.
+    """
+
+    def fold(self, *, policy: object) -> str:
+        lines = [f"{self.name}:"]
+        for token in str(self).split():
+            if len(lines[-1]) + 1 + len(token) > _FOLD_WIDTH and lines[-1] != f"{self.name}:":
+                lines.append("")
+            lines[-1] = f"{lines[-1]} {token}"
+        separator = getattr(policy, "linesep", "\n")
+        return separator.join(lines) + separator
+
+
+_HEADERS = HeaderRegistry()
+_HEADERS.map_to_type("in-reply-to", _MessageIdHeader)
+_HEADERS.map_to_type("references", _MessageIdHeader)
+_POLICY = policy.default.clone(header_factory=_HEADERS)
 
 
 class ComposeError(RuntimeError):
@@ -78,7 +123,7 @@ def header_safe(value: str, field: str) -> str:
     enumerates every field that has to pass through it.
     """
     text = str(value)
-    if any(bad in text for bad in _CONTROL):
+    if len(text.splitlines()) > 1 or _NUL in text:
         raise ComposeError(
             f"{field} contains a line break or a NUL character, which cannot appear in a "
             "mail header. Nothing was sent."
@@ -113,6 +158,17 @@ def _require_plain_address(text: str, field: str) -> None:
         raise ComposeError(
             f"{field} {text!r} is not a plain address. Pass the address on its own — "
             "'bob@example.org', not 'Bob <bob@example.org>'. Nothing was sent."
+        )
+    if _ENCODED_WORD in text:
+        # ``=?`` and ``?=`` are ordinary address characters, so an encoded word
+        # passes every check above — and then ``policy.default`` decodes it when
+        # rendering the To: header, so one token the envelope treats as a single
+        # recipient reaches the reader as two. The envelope is unaffected, but
+        # the message everyone reads, and the copy filed in Sent, would name
+        # someone the caller never did.
+        raise ComposeError(
+            f"{field} {text!r} contains an encoded word, which is not part of an address. "
+            "Nothing was sent."
         )
 
 
@@ -293,7 +349,7 @@ def build_message(
             f"'subject' is {len(subject)} characters; at most {MAX_SUBJECT_CHARS} are allowed. "
             "Nothing was sent."
         )
-    message = EmailMessage()
+    message = EmailMessage(policy=_POLICY)
     message["From"] = validate_address(sender, "the sending address")
     message["To"] = ", ".join(recipients)
     message["Subject"] = header_safe(subject, "'subject'")
@@ -303,7 +359,25 @@ def build_message(
         message["In-Reply-To"] = in_reply_to
         message["References"] = references
     message.set_content(body, subtype="plain", charset="utf-8", cte=_content_encoding(body))
+    _require_header_round_trip(message, recipients)
     return message
+
+
+def _require_header_round_trip(message: EmailMessage, recipients: list[str]) -> None:
+    """The To: a reader will see must name exactly who the envelope names.
+
+    Every value here has been checked, but the check happens before
+    :class:`~email.message.EmailMessage` renders it — and rendering is not the
+    identity. Reading the header back is the only thing that catches a value
+    that passes inspection and then becomes something else, so the guarantee
+    holds against the next such quirk as well as the one already known.
+    """
+    rendered = [address.addr_spec for address in message["To"].addresses]
+    if rendered != recipients:
+        raise ComposeError(
+            "The recipients could not be written to the message without changing them "
+            f"({recipients} became {rendered}). Nothing was sent."
+        )
 
 
 def serialise(message: EmailMessage) -> bytes:

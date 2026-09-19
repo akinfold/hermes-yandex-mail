@@ -9,10 +9,14 @@ and those two demand opposite behaviour from an agent: the first is safe to
 retry, the second must never be retried, because a duplicate message to a real
 person is the worst outcome this module can produce.
 
-So the transaction is driven step by step, and one flag records the only thing
-that actually matters: whether any byte of the message has gone out yet.
-Everything raised before it is set is "nothing was sent"; everything after it
-is "assume it was delivered, and say that the confirmation is missing".
+So the transaction is driven step by step, and one flag records where it got
+to: whether the server has answered ``354`` and accepted responsibility for
+what follows. Everything raised before that is "nothing was sent"; everything
+after it is "assume it was delivered, and say that the confirmation is
+missing". The flag is set just *before* the payload is written rather than
+after, deliberately: a write that fails on its first byte is then reported as
+possibly-delivered, which is the harmless direction to be wrong in. Reporting
+a delivered message as unsent is what produces a duplicate.
 
 TLS is :func:`ssl.create_default_context` with no way to weaken it, for the
 reason 0.2.1 records: an unauthenticated connection carries the app password.
@@ -55,10 +59,10 @@ class SendError(RuntimeError):
 class DeliveryResult:
     """What the server did with one submission.
 
-    ``confirmed`` is False when the payload went out but the closing ``250``
-    never came back. That is not a failure: the message may well have been
-    delivered, and the caller must report it as sent-but-unconfirmed rather
-    than invite a retry.
+    ``confirmed`` is False once the server has answered ``354`` and the closing
+    ``250`` has not come back. That is not a failure: the message may well have
+    been delivered, and the caller must report it as sent-but-unconfirmed
+    rather than invite a retry.
     """
 
     accepted: tuple[str, ...]
@@ -90,6 +94,13 @@ def _dot_stuffed(payload: bytes) -> bytes:
     if not quoted.endswith(b"\r\n"):
         quoted += b"\r\n"
     return quoted + b".\r\n"
+
+
+def _abandon(conn: smtplib.SMTP | None) -> None:
+    """Drop a connection that never became usable, without a second failure."""
+    if conn is not None:
+        with contextlib.suppress(OSError, smtplib.SMTPException):
+            conn.close()
 
 
 def _default_connection(host: str, port: int) -> smtplib.SMTP:
@@ -126,17 +137,25 @@ class YandexSMTPClient:
     def connect(self) -> smtplib.SMTP:
         if self._conn is not None:
             return self._conn
+        conn = None
         try:
             conn = self._factory(self._host, self._port)
             conn.ehlo_or_helo_if_needed()
             conn.login(self._login, self._password)
         except smtplib.SMTPAuthenticationError as exc:
+            _abandon(conn)
             raise SendError(
                 "Yandex refused the SMTP login. The app password needs the Mail scope, and "
                 f"the login must be the full address. Nothing was sent. ({_clean(exc.smtp_error)})"
             ) from exc
         except (OSError, smtplib.SMTPException) as exc:
-            raise SendError(f"Cannot reach {self._host}:{self._port}. Nothing was sent.") from exc
+            # The socket is open by now whenever the factory itself succeeded —
+            # a wrong app password is the likeliest first-run failure, and it
+            # must not leave a TLS connection dangling.
+            _abandon(conn)
+            raise SendError(
+                f"Cannot reach {self._host}:{self._port}. Nothing was sent. ({_clean(exc)})"
+            ) from exc
         self._conn = conn
         return conn
 

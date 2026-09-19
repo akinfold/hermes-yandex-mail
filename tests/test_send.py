@@ -173,9 +173,16 @@ def test_a_reply_threads_onto_the_message_it_names(env, imap, smtp):
     assert f"In-Reply-To: {ANCHOR_ID}" in transmitted(smtp)
 
 
-def test_replying_needs_the_whole_triple(env, imap, smtp):
+def test_replying_needs_the_uid_and_the_folder_together(env, imap, smtp):
     result = send(to="bob@example.org", body="b", reply_to_uid="8")
     assert "reply_to_folder" in result["error"]
+    assert "Nothing was sent" in result["error"]
+    assert smtp.calls == []
+
+
+def test_a_missing_message_id_argument_is_named_after_the_message_is_read(env, imap, smtp):
+    """Blank is allowed this far on purpose — see the no-Message-ID case below."""
+    result = send(to="bob@example.org", body="b", reply_to_uid="8", reply_to_folder="INBOX")
     assert "reply_to_message_id" in result["error"]
     assert smtp.calls == []
 
@@ -498,3 +505,86 @@ def test_junk_in_the_originals_references_does_not_reach_the_reply(env, hostile,
     wire = smtp.written.decode()
     assert "junk-not-an-id" not in wire
     assert "References: <a@x.org> <hostile@evil.example>" in wire
+
+
+def test_a_message_with_no_id_of_its_own_says_so_instead_of_looping(env, monkeypatch, smtp):
+    """The read result reports message_id "", so demanding one had no way out."""
+    headers = b"Subject: No id here\r\nFrom: a@b.org\r\nTo: me@yandex.ru\r\n\r\n"
+    fake = FakeIMAP()
+    fake.responses["FETCH"] = (
+        "OK",
+        [(b"1 (UID 8 RFC822.SIZE 10 BODY[HEADER.FIELDS (X)] {%d}" % len(headers), headers), b")"],
+    )
+    monkeypatch.setattr(
+        tool,
+        "build_client",
+        lambda: YandexIMAPClient(
+            login=ACCOUNT, password="secret", connection_factory=lambda host, port: fake
+        ),
+    )
+    read = json.loads(tool.handle_read({"uid": "8", "folder": "INBOX"}))
+    assert read["message"]["message_id"] == ""
+
+    result = send(to="a@b.org", body="b", reply_to_uid="8", reply_to_folder="INBOX")
+    assert "carries no Message-ID" in result["error"]
+    assert "without the reply_to_* arguments" in result["error"]
+    assert smtp.calls == []
+
+
+def test_threading_a_reply_needs_the_grant_that_reading_needs(env, imap, smtp):
+    """The send tool must not become a way around a withheld read_message."""
+    env[config.ENV_ACTIONS] = "send_message"
+    result = send(to="bob@example.org", body="b", **REPLY_ARGS)
+    assert "'read_message' is not allowed" in result["error"]
+    assert smtp.calls == []
+    assert not [call for call in imap.calls if call[0] == "uid"]
+
+
+def test_an_over_long_inherited_subject_blames_the_original_not_the_caller(env, monkeypatch, smtp):
+    headers = (
+        ("Subject: " + "оченьдлинная " * 60 + "\r\n")
+        + "From: a@b.org\r\nTo: me@yandex.ru\r\nMessage-ID: <long@b.org>\r\n\r\n"
+    ).encode()
+    fake = FakeIMAP()
+    fake.responses["FETCH"] = (
+        "OK",
+        [(b"1 (UID 8 RFC822.SIZE 10 BODY[HEADER.FIELDS (X)] {%d}" % len(headers), headers), b")"],
+    )
+    monkeypatch.setattr(
+        tool,
+        "build_client",
+        lambda: YandexIMAPClient(
+            login=ACCOUNT, password="secret", connection_factory=lambda host, port: fake
+        ),
+    )
+    args = {"reply_to_uid": "8", "reply_to_folder": "INBOX", "reply_to_message_id": "<long@b.org>"}
+    result = send(to="a@b.org", body="b", **args)
+    assert "message being replied to" in result["error"]
+    assert "'subject'" in result["error"]
+    assert smtp.calls == []
+    # Supplying one explicitly is the way through, and the error says so.
+    assert "error" not in send(to="a@b.org", body="b", subject="Re: short", **args)
+
+
+def test_every_refusal_from_this_path_says_nothing_was_sent(env, imap, smtp):
+    """The sentence is what tells an agent a retry is safe, so it cannot be optional.
+
+    The interesting cases are the ones whose text comes from somewhere else —
+    the config layer, the IMAP client, the standard library — because those
+    modules know nothing about sending and end their sentences their own way.
+    """
+    written_here = [
+        send(subject="s", body="b"),
+        send(to="bob@example.org", body="b"),
+        send(to="not-an-address", subject="s", body="b"),
+        send(to="bob@example.org", subject="s", body="b", bcc="x@y.org"),
+        send(to="bob@example.org", subject="s", body="b", reply_to_uid="nope"),
+    ]
+    env[config.ENV_LOGIN] = ""
+    env[config.ENV_PASSWORD] = ""
+    from_elsewhere = send(to="bob@example.org", subject="s", body="b")
+    assert "app-passwords" in from_elsewhere["error"], "expected the config layer's own wording"
+
+    for result in [*written_here, from_elsewhere]:
+        assert result["error"].endswith("Nothing was sent."), result
+    assert smtp.calls == []

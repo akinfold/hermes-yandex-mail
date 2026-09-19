@@ -275,3 +275,69 @@ def test_a_recipient_the_original_was_addressed_to_is_a_participant():
         ACCOUNT,
     )
     assert sources == {"noreply@bank.example": "from", "colleague@example.org": "to"}
+
+
+def test_an_encoded_word_in_an_address_is_refused():
+    """``=?`` is ordinary address text, and EmailMessage decodes it on the way out."""
+    token = "=?utf-8?B?eEBldmlsLm9yZywgeQ==?=@example.org"
+    with pytest.raises(compose.ComposeError, match="encoded word"):
+        compose.parse_recipients(token)
+
+
+def test_a_threading_header_is_never_re_encoded_however_long_the_id():
+    """An ordinary Outlook Message-ID is 81 characters and used to come out as
+    an encoded word no client threads on."""
+    long_id = "<AM0PR05MB48941B2C3D4E5F60718293A4B5C6D7@AM0PR05MB4894.eurprd05.prod.outlook.com>"
+    message = build(in_reply_to=long_id, references=f"<a@x.org> {long_id}")
+    raw = compose.serialise(message).decode()
+    assert f"In-Reply-To: {long_id}" in raw
+    assert "=?utf-8?q?" not in raw
+    assert str(message["In-Reply-To"]) == long_id, "the tool must report what it sent"
+    assert all(len(line.encode()) <= 998 for line in raw.splitlines())
+
+
+def test_a_long_references_chain_folds_between_ids_and_never_inside_one():
+    ids = [f"<id{n}{'a' * 40}@long.example.com>" for n in range(6)]
+    message = build(in_reply_to=ids[-1], references=" ".join(ids))
+    raw = compose.serialise(message).decode()
+    assert "=?utf-8?q?" not in raw
+    for identifier in ids:
+        assert identifier in raw, "an id was split across a fold"
+
+
+def test_a_non_ascii_message_id_is_refused_rather_than_transformed():
+    with pytest.raises(compose.ComposeError, match="Message-ID"):
+        compose.thread_headers(anchor(message_id="<привет@evil.example>"))
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\x0b", "\x0c", "\x1e"])
+def test_every_line_separator_python_knows_is_refused(separator):
+    """policy.default splits headers on str.splitlines(), which is wider than CR/LF."""
+    with pytest.raises(compose.ComposeError, match="line break"):
+        compose.header_safe(f"Invoice{separator}Bcc: collect@evil.example", "'subject'")
+
+
+def test_the_rendered_to_header_must_name_exactly_the_envelope_recipients():
+    """The last line of defence: a value that passes inspection and then changes."""
+    message = build(recipients=["a@example.org", "b@example.org"])
+    assert message["To"] == "a@example.org, b@example.org"
+    with pytest.raises(compose.ComposeError, match="without changing them"):
+        compose._require_header_round_trip(message, ["a@example.org"])
+
+
+def test_the_round_trip_guard_actually_runs_on_every_message(monkeypatch):
+    """It exists for the quirk nobody has found yet, so no input demonstrates it.
+
+    What can be pinned is that it is still called: without this, deleting the
+    call from build_message leaves the whole suite green, since every rendering
+    difference known today is refused earlier.
+    """
+    called: list[tuple] = []
+
+    def record(message, recipients):
+        called.append((message, recipients))
+
+    monkeypatch.setattr(compose, "_require_header_round_trip", record)
+    build(recipients=["a@example.org"])
+    assert called, "build_message no longer reads the rendered header back"
+    assert called[0][1] == ["a@example.org"]

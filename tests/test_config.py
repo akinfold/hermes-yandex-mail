@@ -199,3 +199,9 @@ def test_sending_needs_credentials_like_everything_else(env):
 def test_the_account_address_is_the_configured_login(env):
     env.update({config.ENV_LOGIN: "me@yandex.ru", config.ENV_PASSWORD: "pw"})
     assert config.account_address() == "me@yandex.ru"
+
+
+def test_a_fence_set_to_whitespace_refuses_everything(env):
+    """Set but unparseable must not be indistinguishable from unset."""
+    env[config.ENV_SEND_TO] = "   "
+    assert config.allowed_send_recipients() == []

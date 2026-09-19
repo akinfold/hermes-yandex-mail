@@ -627,7 +627,12 @@ def _reply_request(args: dict[str, Any]) -> tuple[str, str, str] | None:
     parts = {key: str(args.get(key) or "").strip() for key in _REPLY_KEYS}
     if not any(parts.values()):
         return None
-    missing = [key for key, value in parts.items() if not value]
+    # message_id is deliberately NOT required here, only uid and folder. A
+    # message that carries no Message-ID reports one as "", so demanding a
+    # non-empty value would answer "read it and pass the message_id" to a
+    # caller who did exactly that and has nothing to pass — a loop with no way
+    # out. _fetch_anchor reads the message and says what is actually wrong.
+    missing = [key for key in ("reply_to_uid", "reply_to_folder") if not parts[key]]
     if missing:
         raise ValueError(
             "Replying also needs " + ", ".join(sorted(missing)) + ". Read the message with "
@@ -658,11 +663,22 @@ def _fetch_anchor(reply: tuple[str, str, str]) -> ReplyAnchor:
             f"Message {uid} is no longer in {resolved}, so there is nothing to reply to. "
             "Nothing was sent."
         )
+    if not anchor.message_id.strip():
+        raise MailError(
+            f"The message at UID {uid} in {resolved} carries no Message-ID, so a reply cannot "
+            "be threaded onto it. Write to its sender without the reply_to_* arguments if that "
+            "is still wanted. Nothing was sent."
+        )
+    if not expected.strip():
+        raise ValueError(
+            "Replying also needs reply_to_message_id. Read the message with "
+            "yandex_mail_read_message first and pass back the message_id it reports. "
+            "Nothing was sent."
+        )
     if anchor.message_id.strip() != expected.strip():
         raise MailError(
-            f"The message at UID {uid} in {resolved} is not the one you read: it reports "
-            f"{anchor.message_id or 'no Message-ID'}, and 'reply_to_message_id' says "
-            f"{expected}. Read it again to get its current UID. Nothing was sent."
+            f"The message at UID {uid} in {resolved} is not the one you read: its Message-ID "
+            f"is not {expected}. Read it again to get its current UID. Nothing was sent."
         )
     return anchor
 
@@ -674,7 +690,17 @@ def _compose_message(
     in_reply_to = references = ""
     if anchor is not None:
         in_reply_to, references = compose.thread_headers(anchor)
-        subject = subject or compose.reply_subject(anchor.subject)
+        if not subject:
+            subject = compose.reply_subject(anchor.subject)
+            if len(subject) > compose.MAX_SUBJECT_CHARS:
+                # The length is the remote sender's choice, so the error must
+                # not read as a complaint about an argument the caller never
+                # passed.
+                raise ValueError(
+                    f"The subject of the message being replied to is {len(anchor.subject)} "
+                    "characters, which is too long to reuse. Pass an explicit 'subject'. "
+                    "Nothing was sent."
+                )
     if not subject:
         raise ValueError("'subject' is required. Nothing was sent.")
     body = str(args.get("body") or "")
@@ -780,6 +806,19 @@ def _archive_and_flag(raw: bytes, anchor: ReplyAnchor | None, payload: dict[str,
         payload["notes"].append(f"The message was sent, but the follow-up did not complete: {exc}")
 
 
+def _nothing_sent(text: str) -> str:
+    """Every refusal from the send path ends the same way.
+
+    Not every message here is written by this module — some arrive verbatim
+    from the IMAP client, from the config layer, or from the standard library,
+    and those know nothing about sending. The sentence is what tells an agent
+    the call is safe to try again, so it must be a property of the path rather
+    than of whoever happened to raise.
+    """
+    stripped = text.rstrip()
+    return stripped if stripped.endswith("Nothing was sent.") else f"{stripped} Nothing was sent."
+
+
 def handle_send(args: dict[str, Any], **_kwargs: Any) -> str:
     try:
         _reject_unknown_send_keys(args)
@@ -787,17 +826,22 @@ def handle_send(args: dict[str, Any], **_kwargs: Any) -> str:
         sender = compose.validate_address(account_address(), ENV_LOGIN)
         recipients = _fenced_recipients(args.get("to"))
         reply = _reply_request(args)
+        if reply:
+            # Threading a reply means reading the original's headers. A
+            # deployment that withheld read_message did not intend the send
+            # tool to become a way around that.
+            require_action("read_message")
         anchor = _fetch_anchor(reply) if reply else None
         message, subject = _compose_message(args, recipients, sender, anchor)
         raw = compose.serialise(message)
         with build_smtp_client() as smtp:
             result = smtp.send(sender, recipients, raw)
     except MissingCredentials as exc:
-        return _error(str(exc))
+        return _error(_nothing_sent(str(exc)))
     except (MailError, SendError, PermissionDenied, compose.ComposeError, ValueError) as exc:
-        return _error(str(exc))
+        return _error(_nothing_sent(str(exc)))
     except Exception as exc:
-        return _error(f"Unexpected error sending message: {exc}")
+        return _error(_nothing_sent(f"Unexpected error sending message: {exc}"))
     # Past this point the message has left: nothing below may turn into an error.
     try:
         payload = _sent_payload(result, message, sender, subject, anchor)

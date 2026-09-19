@@ -151,7 +151,10 @@ def allowed_send_recipients() -> list[str] | None:
     every recipient: a mistyped fence must fail closed, because the one thing
     it exists to prevent is mail leaving for an address nobody intended.
     """
-    raw = get_provider_env(ENV_SEND_TO).strip()
+    # Tested before stripping, so "unset" and "set to whitespace" stay
+    # distinguishable: the second is a fence somebody meant to write, and a
+    # fence that failed to parse must refuse rather than disappear.
+    raw = get_provider_env(ENV_SEND_TO)
     if not raw:
         return None
     entries = [item.strip() for item in raw.split(",")]

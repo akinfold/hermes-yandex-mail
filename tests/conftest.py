@@ -261,6 +261,9 @@ class FakeSMTP:
     def quit(self) -> None:
         self.calls.append(("quit", None))
 
+    def close(self) -> None:
+        self.calls.append(("close", None))
+
     def rset(self) -> None:
         self.calls.append(("rset", None))
 

@@ -166,3 +166,48 @@ def test_a_drop_between_the_last_recipient_and_data_is_nothing_sent(fake_smtp):
     with client(fake_smtp) as smtp, pytest.raises(SendError, match="dropped before"):
         smtp.send("me@yandex.ru", ["bob@example.org"], PAYLOAD)
     assert fake_smtp.written == b""
+
+
+def test_refusals_survive_an_unconfirmed_delivery(fake_smtp):
+    """The two are independent, and an agent told 'unconfirmed' must not retry —
+    so a refusal dropped here is one no later turn can ever surface."""
+    fake_smtp.rcpt_codes = {"typo@exmaple.org": (550, b"5.1.1 no such user")}
+    fake_smtp.fail_at = "write"
+    with client(fake_smtp) as smtp:
+        result = smtp.send("me@yandex.ru", ["bob@example.org", "typo@exmaple.org"], PAYLOAD)
+    assert result.confirmed is False
+    assert result.accepted == ("bob@example.org",)
+    assert result.refused["typo@exmaple.org"]["code"] == 550
+
+
+def test_a_forwarding_mailbox_answering_251_is_accepted(fake_smtp):
+    """RFC 5321 §3.3: 251 is 'will forward', not a refusal."""
+    fake_smtp.rcpt_codes = {"alias@example.org": (251, b"2.1.5 User not local; will forward")}
+    with client(fake_smtp) as smtp:
+        result = smtp.send("me@yandex.ru", ["alias@example.org"], PAYLOAD)
+    assert result.accepted == ("alias@example.org",)
+    assert result.refused == {}
+
+
+def test_a_refused_login_does_not_leave_the_tls_connection_open(fake_smtp):
+    """A wrong app password is the likeliest first-run failure of all."""
+    fake_smtp.auth_error = True
+    with client(fake_smtp) as smtp, pytest.raises(SendError):
+        smtp.send("me@yandex.ru", ["bob@example.org"], PAYLOAD)
+    assert "close" in fake_smtp.command_names
+
+
+def test_an_unreachable_server_keeps_the_reason_it_gave():
+    """Certificate failure, DNS failure and a refused port must not read alike."""
+
+    def refuse(host: str, port: int):
+        raise ssl.SSLCertVerificationError("certificate verify failed: self-signed certificate")
+
+    smtp = YandexSMTPClient(login="me@yandex.ru", password="x", connection_factory=refuse)
+    with pytest.raises(SendError, match="certificate verify failed"):
+        smtp.send("me@yandex.ru", ["bob@example.org"], PAYLOAD)
+
+
+def test_the_connection_timeout_is_thirty_seconds():
+    """Pinned by value: 'equals DEFAULT_TIMEOUT' passes for any number at all."""
+    assert smtp_module.DEFAULT_TIMEOUT == 30

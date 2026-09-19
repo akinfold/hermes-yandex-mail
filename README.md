@@ -188,8 +188,9 @@ YANDEX_MAIL_SEND_TO=you@yandex.ru,@yourcompany.example
 The fence is checked before a socket is opened. A full entry matches one
 mailbox (`@ya.ru` and `@yandex.ru` are understood to be the same account); an
 `@domain` entry matches that domain exactly — not its subdomains, and not a
-domain that merely ends with it. Set it to something unparseable and nothing is
-allowed through: a mistyped fence fails closed.
+domain that merely ends with it. Set it to something unparseable — including
+whitespace — and nothing is allowed through: a mistyped fence fails closed.
+Leave it unset for no fence at all.
 
 **The rules the tool enforces, whatever it is asked to do:**
 
@@ -206,7 +207,12 @@ allowed through: a mistyped fence fails closed.
 - **A reply must name the message it answers.** `reply_to_uid`,
   `reply_to_folder` and `reply_to_message_id` are required together. A UID
   identifies a slot, not a message; comparing the `message_id` against what the
-  server reports now is what makes "reply to the message I read" mean that.
+  server reports now is what makes "reply to the message I read" mean that. A
+  message carrying no `Message-ID` of its own cannot be replied to — the tool
+  says so rather than threading onto nothing.
+- **Threading needs the grant that reading needs.** Answering a message means
+  reading its headers, so a reply also requires `read_message`. Enabling
+  `send_message` alone gives a tool that can write, not one that can also look.
 - **Nothing gets to become a header.** A line break in a subject, a recipient or
   a copied `Message-ID` is refused, not stripped.
 - **A copy is filed in Sent**, and the message being answered is flagged
