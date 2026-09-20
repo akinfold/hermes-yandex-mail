@@ -10,9 +10,17 @@ from hermes_yandex_mail.imap import DEFAULT_HOST, DEFAULT_PORT
 
 @pytest.fixture
 def env(monkeypatch):
-    """A dict standing in for the environment ``get_provider_env`` reads."""
+    """A dict standing in for the environment ``get_provider_env`` reads.
+
+    Values come back *stripped*, the way both the real ``get_provider_env`` and
+    the bundled shim hand them over, and presence is answered by the key alone.
+    A stand-in that skipped the stripping would make "set to whitespace" look
+    distinguishable from "unset" here while it is not in production — which is
+    how the recipient fence came to fail open.
+    """
     values: dict[str, str] = {}
-    monkeypatch.setattr(config, "get_provider_env", lambda name: values.get(name, ""))
+    monkeypatch.setattr(config, "get_provider_env", lambda name: values.get(name, "").strip())
+    monkeypatch.setattr(config, "provider_env_is_set", lambda name: name in values)
     return values
 
 
@@ -159,6 +167,12 @@ def test_a_fence_that_parses_to_nothing_is_empty_rather_than_absent(env):
     assert config.allowed_send_recipients() == []
 
 
+def test_a_fence_set_to_nothing_at_all_still_refuses_everything(env):
+    """``YANDEX_MAIL_SEND_TO=`` with nothing after it is a fence somebody wrote."""
+    env[config.ENV_SEND_TO] = ""
+    assert config.allowed_send_recipients() == []
+
+
 # -- the SMTP client --------------------------------------------------------
 
 
@@ -205,3 +219,49 @@ def test_a_fence_set_to_whitespace_refuses_everything(env):
     """Set but unparseable must not be indistinguishable from unset."""
     env[config.ENV_SEND_TO] = "   "
     assert config.allowed_send_recipients() == []
+
+
+# -- the fence, read the way production reads it ----------------------------
+
+
+@pytest.fixture
+def real_env(monkeypatch, tmp_path):
+    """No stand-in: the fence resolved through ``_compat`` itself.
+
+    The ``env`` fixture above models the resolver, and a model can agree with
+    itself while production disagrees — which is precisely how this fence came
+    to fail open. Outside a Hermes host the resolver is the bundled shim. The
+    throwaway home keeps the developer's own ``~/.hermes/.env`` out of it.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv(config.ENV_SEND_TO, raising=False)
+    return tmp_path
+
+
+def test_only_an_absent_variable_removes_the_fence(real_env):
+    assert config.allowed_send_recipients() is None
+
+
+@pytest.mark.parametrize("value", ["", " ", "  \t ", ",", " , ", "bogus", "@", "nonsense, @"])
+def test_a_fence_that_is_set_but_unusable_refuses_every_recipient(real_env, monkeypatch, value):
+    monkeypatch.setenv(config.ENV_SEND_TO, value)
+    assert config.allowed_send_recipients() == []
+
+
+def test_a_usable_fence_survives_the_real_resolver(real_env, monkeypatch):
+    monkeypatch.setenv(config.ENV_SEND_TO, " owner@yandex.ru , @example.org ")
+    assert config.allowed_send_recipients() == ["owner@yandex.ru", "@example.org"]
+
+
+def test_a_fence_named_only_in_the_hermes_env_file_counts_as_set(real_env):
+    (real_env / ".hermes").mkdir()
+    (real_env / ".hermes" / ".env").write_text(f"{config.ENV_SEND_TO}=\n", encoding="utf-8")
+    assert config.allowed_send_recipients() == []
+
+
+def test_a_fence_written_in_the_hermes_env_file_is_parsed(real_env):
+    (real_env / ".hermes").mkdir()
+    (real_env / ".hermes" / ".env").write_text(
+        f"{config.ENV_SEND_TO}=owner@yandex.ru,@example.org\n", encoding="utf-8"
+    )
+    assert config.allowed_send_recipients() == ["owner@yandex.ru", "@example.org"]
