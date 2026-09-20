@@ -1,5 +1,5 @@
 name: yandex_mail
-version: 0.3.0
+version: 0.3.1
 description: "Search, read, flag, move, and delete Yandex Mail messages over IMAP, and send over SMTP. Requires YANDEX_MAIL_LOGIN and YANDEX_MAIL_APP_PASSWORD; YANDEX_MAIL_ACTIONS restricts which tools are exposed, and sending is off unless it names send_message explicitly."
 author: akinfold
 kind: standalone

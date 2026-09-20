@@ -204,7 +204,7 @@ A value that is set but names nothing usable — `bogus`, whitespace, or nothing
 at all after the `=` — allows **nobody** through: a mistyped fence fails closed.
 Removing the variable is the only thing that removes the fence.
 
-> **This changed, deliberately.** An empty or whitespace-only
+> **This changed in 0.3.1, deliberately.** An empty or whitespace-only
 > `YANDEX_MAIL_SEND_TO` used to read as "unset" and so allowed every address.
 > It now refuses every recipient, with the usual `YANDEX_MAIL_SEND_TO does not
 > allow sending to …` error and nothing sent. If your configuration carries an
