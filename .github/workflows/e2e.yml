@@ -1,7 +1,8 @@
 # Manual live e2e. Credentials come from a GitHub Environment named
 # `yandex-mail-e2e` — define YANDEX_MAIL_LOGIN and YANDEX_MAIL_APP_PASSWORD as
-# secrets there. The suite only touches a throwaway message it uploads itself
-# and deletes afterwards; it never sends mail to anyone.
+# secrets there. The suite touches a throwaway message it uploads itself and
+# deletes afterwards, and it sends real mail over SMTP — fenced by
+# YANDEX_MAIL_SEND_TO to the test account, so nobody else is emailed.
 name: E2E (live)
 
 on:

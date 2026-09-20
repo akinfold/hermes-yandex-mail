@@ -102,8 +102,10 @@ def allowed_actions() -> frozenset[str]:
     Accepts single actions (``read_message``), the group shorthands in
     :data:`ACTION_GROUPS` (``read``, ``write``, ``delete``, ``all``), and full
     tool names (``yandex_mail_delete_message``), comma-separated and
-    case-insensitive. Unset or blank means every action, so existing installs
-    are unaffected. Any other value is an explicit allow-list: names that match
+    case-insensitive. Unset or blank means :data:`DEFAULT_ACTIONS` — every action
+    except ``send_message`` — so existing installs are unaffected and an upgrade
+    never switches sending on; ``all`` behaves the same way. ``send_message`` is
+    granted only by naming it. Any other value is an explicit allow-list: names that match
     nothing are dropped rather than raising, so a typo can only ever withhold a
     tool, never grant one (a value naming nothing valid therefore allows
     nothing). Tools are filtered at registration time and permissions are

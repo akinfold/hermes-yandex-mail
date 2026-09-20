@@ -2,7 +2,8 @@
 
 Thanks for your interest in improving **hermes-yandex-mail** — a
 [Hermes Agent](https://hermes-agent.nousresearch.com) plugin that reads and
-organises a Yandex mailbox over IMAP. Contributions of all sizes are welcome:
+organises a Yandex mailbox over IMAP and, when it is switched on, sends mail
+over SMTP. Contributions of all sizes are welcome:
 bug reports, docs, tests, and features.
 
 All repository content — code, comments, docs, commit messages, issues, and
@@ -28,7 +29,7 @@ hermes_yandex_mail/
   _compat.py    # real-vs-shim host env helper
   tool.py       # tool schemas + handlers (JSON in, JSON string out)
   __init__.py   # register(ctx) — the plugin entry point
-tests/          # unit tests (no network, a scripted FakeIMAP in conftest.py)
+tests/          # unit tests (no network, scripted FakeIMAP and FakeSMTP in conftest.py)
 tests/e2e/      # live tests against a real mailbox, marked `e2e`
 ```
 
@@ -62,8 +63,9 @@ The plugin follows the Hermes plugin contract; a few of these are load-bearing:
   that rule will eventually disagree with the first.
 - **Secrets** are resolved via `_compat.get_provider_env`; never log their values.
 - **Non-ASCII on the wire.** `imaplib` encodes `str` arguments as ASCII, so any
-  argument that can carry Cyrillic (folder names, search terms) must be passed as
-  UTF-8 `bytes`.
+  argument that can carry Cyrillic must be passed as `bytes` — folder names as
+  modified UTF-7 through `_quote_mailbox` (RFC 3501), search terms as UTF-8
+  through `_quoted` together with `CHARSET UTF-8`.
 
 ## Checks
 
@@ -79,7 +81,9 @@ the bar. `radon cc -a hermes_yandex_mail` shows the average.
 Unit tests must not open a socket: `tests/conftest.py` provides `FakeIMAP`, a
 scriptable stand-in for an `imaplib.IMAP4` connection that records every command,
 so tests can assert on the wire traffic (including the order of `COPY`, `STORE`,
-and `EXPUNGE`). Live tests go under `tests/e2e/`, are marked `@pytest.mark.e2e`,
+and `EXPUNGE`), and `FakeSMTP`, the same for `smtplib.SMTP_SSL`, which models how
+far the bytes got so the nothing-sent / possibly-delivered distinction can be
+tested. Live tests go under `tests/e2e/`, are marked `@pytest.mark.e2e`,
 and skip when credentials are absent.
 
 ## Running the live tests locally
@@ -93,8 +97,10 @@ pytest -m e2e -v
 ```
 
 The suite uploads one throwaway message with a unique marker via IMAP `APPEND`,
-exercises the tools against it, and erases it in a `finally` — nothing is sent,
-so no one is emailed. Use a dedicated test mailbox anyway, never a personal one.
+exercises the tools against it, and erases it in a `finally`. Since 0.3.0 it also
+exercises the send path for real over SMTP: it sets `YANDEX_MAIL_SEND_TO` to the
+test account itself, so mail is genuinely sent and delivered, but only ever to that
+mailbox — no third party is emailed. Use a dedicated test mailbox anyway, never a personal one.
 `YANDEX_MAIL_APP_PASSWORD` must be an app password with the **Mail** scope, and
 IMAP must be enabled for the mailbox. Live tests are manual and never required
 for a PR.

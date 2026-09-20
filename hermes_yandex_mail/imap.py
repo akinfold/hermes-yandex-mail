@@ -813,15 +813,15 @@ class YandexIMAPClient:
         resolved from the full, unfiltered, cached server folder list —
         deliberately not the allow-list-``list_folders()``.
 
-        Two reasons: performance — reusing ``_cached_folder_list()`` costs no
-        extra LIST when a folder has already been resolved earlier in the
-        same call, where ``list_folders()`` always issues a fresh one — and
-        correctness for ``_delete_to_trash``, which needs to find Trash even
-        when ``YANDEX_MAIL_FOLDERS`` excludes it: Trash is this tool's own
-        safety net for "delete", not a folder the agent chose, so a
-        deployment fencing off everything but INBOX (the README's
-        recommended safest setup) must not lose it and fall back to
-        pointing at an irreversible expunge instead.
+        Reusing ``_cached_folder_list()`` costs no extra LIST once a folder has
+        been resolved earlier in the same call, where ``list_folders()`` always
+        issues a fresh one.
+
+        This resolver falls back to well-known folder NAMES when the server
+        sends no special-use flag, so it must not be used for anything that
+        bypasses the allow-list. Soft delete and the Sent copy use
+        :meth:`find_flagged_folder` instead, which trusts the flag alone; only
+        the live e2e suite still calls this one.
         """
         for folder in self._cached_folder_list():
             if folder.special_use == role:
@@ -1274,8 +1274,9 @@ class YandexIMAPClient:
     ) -> str | None:
         """Upload a message into a folder; returns its new UID when the server says.
 
-        Not exposed as a tool — the live e2e suite uses it to plant the
-        throwaway message it then reads, moves, and removes.
+        Not exposed as a tool of its own. ``yandex_mail_send_message`` uses it to
+        file the copy of a sent message in Sent, and the live e2e suite uses it
+        to plant the throwaway message it then reads, moves, and removes.
         """
         conn = self.connect()
         self._selected = None
