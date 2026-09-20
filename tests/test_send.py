@@ -32,12 +32,14 @@ REPLY_ARGS = {
 
 @pytest.fixture
 def env(monkeypatch) -> dict[str, str]:
+    """The environment as the config layer sees it: stripped values, keys for presence."""
     values = {
         config.ENV_LOGIN: ACCOUNT,
         config.ENV_PASSWORD: "secret",
         config.ENV_ACTIONS: "all,send_message",
     }
-    monkeypatch.setattr(config, "get_provider_env", lambda name: values.get(name, ""))
+    monkeypatch.setattr(config, "get_provider_env", lambda name: values.get(name, "").strip())
+    monkeypatch.setattr(config, "provider_env_is_set", lambda name: name in values)
     return values
 
 
@@ -139,6 +141,20 @@ def test_a_fence_that_parsed_to_nothing_refuses_every_recipient(env, imap, smtp)
     result = send(to="bob@example.org", subject="Hello", body="Text.")
     assert config.ENV_SEND_TO in result["error"]
     assert smtp.calls == []
+
+
+@pytest.mark.parametrize("value", ["   ", ""])
+def test_a_fence_set_to_nothing_usable_refuses_rather_than_disappearing(env, imap, smtp, value):
+    """A mistyped fence must not hand the agent the whole address space.
+
+    The value reaches the config layer stripped, so only the presence of the
+    variable itself tells this apart from "no fence configured".
+    """
+    env[config.ENV_SEND_TO] = value
+    result = send(to="bob@example.org", subject="Hello", body="Text.")
+    assert config.ENV_SEND_TO in result["error"]
+    assert smtp.calls == []
+    assert smtp.written == b""
 
 
 def test_a_smuggled_second_address_is_refused_before_connecting(env, imap, smtp):

@@ -26,7 +26,7 @@ hermes_yandex_mail/
   compose.py    # builds an outgoing message and refuses unsafe addressing
   smtp.py       # hand-driven SMTP submission, no Hermes imports
   config.py     # env -> client, folder allow-list, action allow-list
-  _compat.py    # real-vs-shim host env helper
+  _compat.py    # real-vs-shim host env helper: a variable's value, and whether it is set
   tool.py       # tool schemas + handlers (JSON in, JSON string out)
   __init__.py   # register(ctx) — the plugin entry point
 tests/          # unit tests (no network, scripted FakeIMAP and FakeSMTP in conftest.py)
@@ -62,6 +62,10 @@ The plugin follows the Hermes plugin contract; a few of these are load-bearing:
   `@ya.ru` and `@yandex.ru` as the same mailbox, and a second private copy of
   that rule will eventually disagree with the first.
 - **Secrets** are resolved via `_compat.get_provider_env`; never log their values.
+  That value arrives stripped, so it cannot tell "unset" from "set to
+  whitespace". When absence and emptiness must mean different things — as they
+  do for `YANDEX_MAIL_SEND_TO`, where absence means "no fence" — ask
+  `_compat.provider_env_is_set` as well.
 - **Non-ASCII on the wire.** `imaplib` encodes `str` arguments as ASCII, so any
   argument that can carry Cyrillic must be passed as `bytes` — folder names as
   modified UTF-7 through `_quote_mailbox` (RFC 3501), search terms as UTF-8

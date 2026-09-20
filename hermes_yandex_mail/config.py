@@ -6,7 +6,7 @@ Secrets are resolved via :func:`get_provider_env` (env vars, then
 
 from __future__ import annotations
 
-from ._compat import get_provider_env
+from ._compat import get_provider_env, provider_env_is_set
 from .imap import DEFAULT_HOST, DEFAULT_PORT, YandexIMAPClient
 from .smtp import DEFAULT_SMTP_HOST, DEFAULT_SMTP_PORT, YandexSMTPClient
 
@@ -148,16 +148,26 @@ def allowed_send_recipients() -> list[str] | None:
     """The addresses sending is fenced to, or ``None`` when no fence is set.
 
     An entry is either a full address (one mailbox, compared through
-    :func:`normalize_email`) or ``@domain`` (that domain and no other). A value
-    that is set but yields no usable entry returns an empty list, which refuses
-    every recipient: a mistyped fence must fail closed, because the one thing
-    it exists to prevent is mail leaving for an address nobody intended.
+    :func:`normalize_email`) or ``@domain`` (that domain and no other). A
+    variable that is set but yields no usable entry returns an empty list,
+    which refuses every recipient: a mistyped fence must fail closed, because
+    the one thing it exists to prevent is mail leaving for an address nobody
+    intended. Whitespace and a bare ``YANDEX_MAIL_SEND_TO=`` are covered by
+    that, not by ``None``.
+
+    What is *not* guaranteed: whether the variable is set is decided by
+    :func:`provider_env_is_set`, which can see ``os.environ`` and
+    ``~/.hermes/.env`` and nothing else. Under a Hermes host a value may also
+    arrive from Hermes' own configuration layer, which this plugin cannot
+    inspect without importing host internals. A fence supplied only that way,
+    and only as whitespace, still reads as no fence at all.
     """
-    # Tested before stripping, so "unset" and "set to whitespace" stay
-    # distinguishable: the second is a fence somebody meant to write, and a
-    # fence that failed to parse must refuse rather than disappear.
+    # The resolved value cannot answer this on its own: it is stripped before
+    # it gets here, so "unset" and "set to whitespace" look identical. The
+    # presence of the name is what tells them apart, and a fence somebody meant
+    # to write must refuse rather than disappear.
     raw = get_provider_env(ENV_SEND_TO)
-    if not raw:
+    if not raw and not provider_env_is_set(ENV_SEND_TO):
         return None
     entries = [item.strip() for item in raw.split(",")]
     return [entry for entry in entries if _is_fence_entry(entry)]

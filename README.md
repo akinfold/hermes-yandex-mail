@@ -108,7 +108,7 @@ is off unless you switch it on — see [Sending mail](#sending-mail).
 | `YANDEX_MAIL_ACTIONS` | no | *(all but sending)* | Comma-separated allow-list of actions the agent may perform — see below. |
 | `YANDEX_MAIL_SMTP_HOST` | no | `smtp.yandex.ru` | Override for a Yandex 360 domain or for testing. |
 | `YANDEX_MAIL_SMTP_PORT` | no | `465` | SMTP over implicit TLS. |
-| `YANDEX_MAIL_SEND_TO` | no | *(any address)* | Comma-separated fence on who may be written to: full addresses, or `@domain` for a whole domain. |
+| `YANDEX_MAIL_SEND_TO` | no | *(any address)* | Comma-separated fence on who may be written to: full addresses, or `@domain` for a whole domain. A value that is set but names nothing usable — whitespace, or nothing after the `=` — refuses **every** recipient; only removing the variable removes the fence. |
 
 Credentials are read from the environment first, then from `~/.hermes/.env`, so
 they work in gateway and subprocess runs. Secret values are never logged.
@@ -198,9 +198,24 @@ YANDEX_MAIL_SEND_TO=you@yandex.ru,@yourcompany.example
 The fence is checked before a socket is opened. A full entry matches one
 mailbox (`@ya.ru` and `@yandex.ru` are understood to be the same account); an
 `@domain` entry matches that domain exactly — not its subdomains, and not a
-domain that merely ends with it. Set it to something unparseable — including
-whitespace — and nothing is allowed through: a mistyped fence fails closed.
-Leave it unset for no fence at all.
+domain that merely ends with it.
+
+A value that is set but names nothing usable — `bogus`, whitespace, or nothing
+at all after the `=` — allows **nobody** through: a mistyped fence fails closed.
+Removing the variable is the only thing that removes the fence.
+
+> **This changed, deliberately.** An empty or whitespace-only
+> `YANDEX_MAIL_SEND_TO` used to read as "unset" and so allowed every address.
+> It now refuses every recipient, with the usual `YANDEX_MAIL_SEND_TO does not
+> allow sending to …` error and nothing sent. If your configuration carries an
+> empty `YANDEX_MAIL_SEND_TO=` and you rely on sending, either delete the line
+> (no fence) or fill it in (a fence).
+>
+> What "set" means has a limit worth knowing. The plugin looks for the name in
+> the process environment and in `~/.hermes/.env`. A value that reaches it only
+> through Hermes' own configuration layer cannot be seen there, and if it
+> strips to nothing it still reads as no fence at all. Keep the fence in the
+> environment or in `~/.hermes/.env`.
 
 **The rules the tool enforces, whatever it is asked to do:**
 
