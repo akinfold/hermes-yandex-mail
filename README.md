@@ -100,11 +100,11 @@ is off unless you switch it on — see [Sending mail](#sending-mail).
 
 | Env var | Required | Default | Meaning |
 |---|---|---|---|
-| `YANDEX_MAIL_LOGIN` | yes | — | Yandex login / email. |
+| `YANDEX_MAIL_LOGIN` | yes | — | Your full Yandex address, e.g. `you@yandex.ru`. Sending needs the complete address: it becomes `From` and the envelope sender, and `yandex_mail_send_message` refuses a bare login. |
 | `YANDEX_MAIL_APP_PASSWORD` | yes | — | App password with the Mail scope — an account password will not work. |
 | `YANDEX_MAIL_IMAP_HOST` | no | `imap.yandex.ru` | Override for a Yandex 360 domain or for testing. |
 | `YANDEX_MAIL_IMAP_PORT` | no | `993` | IMAP over TLS. |
-| `YANDEX_MAIL_FOLDERS` | no | *(all)* | Comma-separated allow-list of folders, e.g. `INBOX,Sent`. The first is the default folder. |
+| `YANDEX_MAIL_FOLDERS` | no | *(all)* | Comma-separated allow-list of folders, spelled as `yandex_mail_list_folders` reports them; case is ignored, but role words and synonyms such as `sent` or `spam` are **not** expanded here, so on an account whose Sent folder carries a localised name, that localised name is the one to list. The first entry is the default folder. |
 | `YANDEX_MAIL_ACTIONS` | no | *(all but sending)* | Comma-separated allow-list of actions the agent may perform — see below. |
 | `YANDEX_MAIL_SMTP_HOST` | no | `smtp.yandex.ru` | Override for a Yandex 360 domain or for testing. |
 | `YANDEX_MAIL_SMTP_PORT` | no | `465` | SMTP over implicit TLS. |
@@ -134,6 +134,10 @@ Accepted values, comma-separated and case-insensitive — individual actions
 | `write` | `mark_message`, `move_message` |
 | `delete` | `delete_message` |
 | `all` | every action **except** `send_message` (the default) |
+
+`read_message` with `mark_read=true` changes the `\Seen` flag, so it also needs
+`mark_message`. Under `YANDEX_MAIL_ACTIONS=read` such a call is refused and
+nothing is read.
 
 ```dotenv
 # Read the mail, change nothing:
@@ -167,8 +171,14 @@ the environment is restricted. Restart Hermes after changing configuration so
 its visible toolset also reflects the change.
 
 Pair it with `YANDEX_MAIL_FOLDERS` to fence off the rest of the mailbox: with
-`YANDEX_MAIL_FOLDERS=INBOX`, every other folder is invisible and unusable — as a
-source *and* as a move destination.
+`YANDEX_MAIL_FOLDERS=INBOX`, every other folder is invisible to the agent and
+cannot be named — as a source *or* as a move destination.
+
+Two folders stay reachable by the plugin itself, never by name. A delete still
+moves the message into the folder the server flags as Trash, and a sent message
+is still filed into the one it flags as Sent, whether or not the allow-list
+mentions them. Naming either folder in a tool call is still refused; only these
+two built-in steps may reach it.
 
 ## Sending mail
 
@@ -228,8 +238,18 @@ stands in that thread:
   "sent": true,
   "delivery": "confirmed",
   "recipients": ["counterparty@example.org"],
+  "from": "you@yandex.ru",
+  "subject": "Re: Contract",
+  "message_id": "<178985821691.1252.15561456921@yandex.ru>",
   "recipient_sources": {"counterparty@example.org": "from"},
   "in_reply_to": "<original@example.org>",
+  "replied_to": {
+    "uid": "8",
+    "folder": "INBOX",
+    "subject": "Contract",
+    "from": ["Counterparty <counterparty@example.org>"],
+    "message_id": "<original@example.org>"
+  },
   "saved_to_sent": true,
   "sent_folder": "Sent",
   "marked_answered": true,
@@ -238,9 +258,11 @@ stands in that thread:
 ```
 
 `recipient_sources` is always present on a reply, and says whether each address
-sent the original (`from`), was among its `To` recipients (`to`), appeared only
-in its `Reply-To` (`reply_to_only`), or is new to the thread (`new`). The last
-two are worth reading: a message asking for replies at an address it was not
+is your own account (`self`), sent the original (`from`), was among its `To`
+recipients (`to`), appeared only in its `Reply-To` (`reply_to_only`), or is none
+of those (`new`). The original's `Cc` is deliberately not consulted, so someone
+who was only Cc'd on it also comes back as `new`. `reply_to_only` and `new` are
+the two worth reading: a message asking for replies at an address it was not
 sent from is the standard shape of a phishing redirect, and the tool says so in
 `notes` rather than deciding for you.
 
@@ -249,8 +271,11 @@ acknowledged it. That is not a failure and must not be retried — sending again
 would deliver a second copy. Anything that goes wrong *before* the message is
 written says "Nothing was sent" and is safe to try again.
 
-Plain text only: no HTML, no attachments, at most 10 recipients and 100 000
-characters per message.
+Plain text only: no HTML, no attachments, and no Cc or Bcc — every recipient goes
+in `to`, and an argument the tool does not know (`cc`, `bcc`, `from`,
+`attachments`, …) refuses the whole call instead of being silently dropped. At
+most 10 recipients, a 500-character subject, and a 100 000-character body per
+message.
 
 ## Enabling IMAP in Yandex Mail
 
@@ -297,11 +322,15 @@ is off, or the app password lacks the Mail scope.
   turning verification off. *(Releases 0.1.0 and 0.2.0 did not verify — see
   [Security](#security).)*
 - **Attachments are listed, not downloaded** — name, MIME type, and size. The
-  body is capped (20 000 characters by default) and says when it was truncated.
+  body is capped (20 000 characters by default, raised with `max_chars` up to
+  100 000) and says when it was truncated. A message whose raw size exceeds
+  10 MiB, typically one carrying large attachments, is refused outright rather
+  than read.
 - **Yandex' SMTP does not advertise `SMTPUTF8`,** so an address with non-ASCII
   characters in it cannot be sent to at all. It is refused with a sentence
   saying why, rather than failing somewhere inside the standard library.
-  Subjects and display names in any language are fine.
+  Subjects and message bodies in any language are fine; display names are not,
+  because every recipient must be given as a bare address.
 
 ## Installing the plugin into Hermes
 
@@ -322,7 +351,9 @@ Hermes discovers it through the `hermes_agent.plugins` entry point; add
 
 ### Option C — drop-in directory
 
-Unzip the release archive into `~/.hermes/plugins/` so you end up with
+Download `hermes-yandex-mail-plugin-<version>.zip` from the release — not the
+wheel, the `.tar.gz`, or GitHub's "Source code" archives — and unzip it into
+`~/.hermes/plugins/` so you end up with
 `~/.hermes/plugins/yandex_mail/plugin.yaml`, then enable it the same way.
 
 ## Development

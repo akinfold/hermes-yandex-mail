@@ -2,10 +2,11 @@
 
 Marked ``e2e`` and deselected by default; run them with ``pytest -m e2e``.
 
-They are self-contained: nothing is *sent*, so no third party is ever emailed.
 The suite uploads (IMAP ``APPEND``) one throwaway message with a unique marker
 in its subject, exercises the whole tool surface against it, and erases it in a
-``finally`` — so a failed assertion still leaves the mailbox as it was found.
+``finally`` — so a failed assertion still leaves the mailbox as it was found. The
+send path is exercised for real over SMTP, with ``YANDEX_MAIL_SEND_TO`` fenced to
+the test account, so mail is sent but never to a third party.
 """
 
 from __future__ import annotations

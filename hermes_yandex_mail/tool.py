@@ -35,7 +35,7 @@ TOOLSET = "yandex_mail"
 
 _FOLDER_HINT = (
     "Folder name as returned by yandex_mail_list_folders (e.g. 'INBOX', 'Sent', 'Spam'). "
-    "Omit for the default folder (INBOX)."
+    "Omit for the default folder (INBOX, or the first folder of YANDEX_MAIL_FOLDERS when set)."
 )
 # Required on every UID-scoped tool (read/mark/move/delete): a UID is only meaningful
 # inside the folder it came from, and UID numbering is independent per folder — reusing
@@ -138,11 +138,17 @@ READ_SCHEMA: dict[str, Any] = {
             "folder": {"type": "string", "description": _REQUIRED_FOLDER_HINT},
             "mark_read": {
                 "type": "boolean",
-                "description": "Mark the message as read while opening it (false by default).",
+                "description": (
+                    "Mark the message as read while opening it (false by default). Requires "
+                    "the mark_message action as well; without it the call is refused and "
+                    "nothing is read."
+                ),
             },
             "max_chars": {
                 "type": "integer",
-                "description": "Truncate the body to this many characters (default 20000).",
+                "description": (
+                    "Truncate the body to this many characters (default 20000, max 100000)."
+                ),
             },
         },
         "required": ["uid", "folder"],
