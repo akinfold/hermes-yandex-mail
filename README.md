@@ -39,7 +39,7 @@ Tested against Hermes **0.19.x–0.21.x**, Python **3.11–3.13**.
 
 ```bash
 # 1. Install into Hermes (alternatively: pip install hermes-yandex-mail)
-hermes plugins install akinfold/hermes-yandex-mail --enable
+hermes plugins install akinfold/hermes-yandex-mail/hermes_yandex_mail --enable
 
 # 2. Add your credentials — the app password comes from
 #    https://id.yandex.ru/security/app-passwords (scope: "Почта" / Mail)
@@ -47,7 +47,8 @@ printf 'YANDEX_MAIL_LOGIN=%s\nYANDEX_MAIL_APP_PASSWORD=%s\n' \
   'you@yandex.ru' 'your-app-password' >> ~/.hermes/.env
 ```
 
-Then enable it in `~/.hermes/config.yaml` (third-party plugins are off by default):
+`--enable` writes the plugin's name into `~/.hermes/config.yaml` for you —
+third-party plugins are off until something does:
 
 ```yaml
 plugins:
@@ -373,8 +374,22 @@ is off, or the app password lacks the Mail scope.
 ### Option A — from Git (recommended)
 
 ```bash
-hermes plugins install akinfold/hermes-yandex-mail --enable
+hermes plugins install akinfold/hermes-yandex-mail/hermes_yandex_mail --enable
 ```
+
+Note the `/hermes_yandex_mail` at the end. The plugin lives in that directory,
+not at the repository root, and Hermes reads the manifest from whatever you point
+it at. Name the directory and the install is a plugin: Hermes prompts for
+`YANDEX_MAIL_LOGIN` and `YANDEX_MAIL_APP_PASSWORD`, installs under the manifest
+name `yandex_mail`, and `--enable` enables that name. It also scans only that
+directory, so the tests and workflows in this repository stay out of the security
+report.
+
+Point it at the repository root instead and the install still appears to succeed,
+but it copies a directory with no manifest and no `register(ctx)` in it: Hermes
+warns that it "may not be a valid Hermes plugin", asks for nothing, and enables the
+repository name, which nothing answers to. If you installed that way, remove
+`~/.hermes/plugins/hermes-yandex-mail` and install again with the directory named.
 
 ### Option B — pip
 
