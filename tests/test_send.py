@@ -293,11 +293,69 @@ def test_a_missing_final_confirmation_is_also_unconfirmed(env, imap, monkeypatch
     assert result["delivery"] == "unconfirmed"
 
 
-def test_a_rejected_final_code_does_not_become_nothing_sent(env, imap, monkeypatch):
-    wire_smtp(monkeypatch, FakeSMTP(final_code=451))
+def test_a_rejected_body_is_an_error_carrying_what_the_server_said(env, imap, monkeypatch):
+    """The reply to end-of-data is the verdict: a 554 means nobody got this."""
+    smtp = wire_smtp(
+        monkeypatch,
+        FakeSMTP(final_code=554, final_text=b"5.7.1 Message rejected under suspicion of SPAM"),
+    )
     result = send(to="bob@example.org", subject="s", body="b")
-    assert result["sent"] is True
-    assert result["delivery"] == "unconfirmed"
+    assert "sent" not in result
+    assert "554" in result["error"]
+    assert "5.7.1 Message rejected under suspicion of SPAM" in result["error"]
+    assert "Nothing was delivered" in result["error"]
+    assert result["error"].count("Nothing was sent.") == 1
+    # The payload did go out, and no copy of it was filed anywhere.
+    assert smtp.written != b""
+    assert [call for call in imap.calls if call[0] == "append"] == []
+
+
+def test_a_rejected_reply_leaves_the_original_unflagged(env, imap, monkeypatch):
+    """Nothing was delivered, so none of the bookkeeping a send does may happen."""
+    wire_smtp(monkeypatch, FakeSMTP(final_code=550, final_text=b"5.1.1 no such user"))
+    result = send(to="noreply@id.yandex.ru", body="b", **REPLY_ARGS)
+    assert "sent" not in result
+    assert "550 5.1.1 no such user" in result["error"]
+    assert [call for call in imap.calls if call[0] == "append"] == []
+    assert "STORE" not in imap.command_names()
+
+
+def test_a_temporarily_rejected_body_says_it_can_be_sent_again(env, imap, monkeypatch):
+    """A 452 must not read like the unretryable 'unconfirmed' outcome."""
+    wire_smtp(monkeypatch, FakeSMTP(final_code=452, final_text=b"4.2.2 Mailbox over quota"))
+    result = send(to="bob@example.org", subject="s", body="b")
+    assert "sent" not in result
+    assert "452 4.2.2 Mailbox over quota" in result["error"]
+    assert "again later" in result["error"]
+    assert "second copy" not in result["error"]
+
+
+def test_a_rejected_body_reports_the_addresses_refused_before_it(env, imap, monkeypatch):
+    """A bad address plus a rejected body: one error, no partial delivery.
+
+    Before the body was rejected the server had already turned one recipient
+    down. That used to reach the caller in the payload's ``refused`` field;
+    there is no payload now, so the error has to carry it, or a retry of the
+    same list walks into the same wall.
+    """
+    smtp = wire_smtp(
+        monkeypatch,
+        FakeSMTP(
+            rcpt_codes={"typo@exmaple.org": (550, b"5.1.1 no such user")},
+            final_code=554,
+            final_text=b"5.7.1 Message rejected under suspicion of SPAM",
+        ),
+    )
+    result = send(to="bob@example.org, typo@exmaple.org", subject="s", body="b")
+    assert "sent" not in result
+    assert "refused" not in result
+    assert "typo@exmaple.org" in result["error"]
+    assert "Nothing was delivered, to any recipient" in result["error"]
+    # Nothing may hint that the accepted address got a copy.
+    assert "bob@example.org" not in result["error"]
+    assert "delivered to the others" not in result["error"]
+    assert smtp.written != b""
+    assert [call for call in imap.calls if call[0] == "append"] == []
 
 
 def test_a_refused_login_says_so_and_sends_nothing(env, imap, monkeypatch):

@@ -99,6 +99,225 @@ def test_a_drop_while_writing_is_never_reported_as_nothing_sent(fake_smtp):
     assert result.accepted == ("bob@example.org",)
 
 
+# -- the verdict after end-of-data ------------------------------------------
+#
+# RFC 5321 §4.2: the reply to the closing dot is the server's answer about the
+# whole message. A 250 is the server taking responsibility for it; a 4xx or 5xx
+# is the server declining to, which means nothing was delivered to anybody. The
+# two must not read alike, and neither may be confused with the third case —
+# no reply at all — where what happened is genuinely unknown.
+
+
+@pytest.mark.parametrize(
+    ("code", "text"),
+    [
+        (550, b"5.1.1 Mailbox unavailable"),
+        (554, b"5.7.1 Message rejected under suspicion of SPAM"),
+    ],
+)
+def test_a_permanent_rejection_after_the_body_is_not_a_delivery(fake_smtp, code, text):
+    fake_smtp.final_code = code
+    fake_smtp.final_text = text
+    with client(fake_smtp) as smtp, pytest.raises(SendError) as excinfo:
+        smtp.send("me@yandex.ru", ["bob@example.org"], PAYLOAD)
+    message = str(excinfo.value)
+    assert "Nothing was delivered" in message
+    assert str(code) in message
+    assert text.decode() in message
+    assert "permanent" in message
+    # The bytes really did go out; the point is that nothing came of them.
+    assert fake_smtp.written != b""
+
+
+def test_a_temporary_rejection_after_the_body_invites_a_later_retry(fake_smtp):
+    """A 452 is the server saying 'not now', not 'not ever'."""
+    fake_smtp.final_code = 452
+    fake_smtp.final_text = b"4.2.2 Mailbox over quota"
+    with client(fake_smtp) as smtp, pytest.raises(SendError) as excinfo:
+        smtp.send("me@yandex.ru", ["bob@example.org"], PAYLOAD)
+    message = str(excinfo.value)
+    assert "452 4.2.2 Mailbox over quota" in message
+    assert "temporary" in message
+    assert "again later" in message
+    assert "permanent" not in message
+
+
+def test_a_421_after_the_body_is_a_refusal_not_an_unknown_outcome(fake_smtp):
+    """The channel is closing, but the server still answered: it took nothing on."""
+    fake_smtp.final_code = 421
+    fake_smtp.final_text = b"4.7.0 Service not available, closing transmission channel"
+    with client(fake_smtp) as smtp, pytest.raises(SendError) as excinfo:
+        smtp.send("me@yandex.ru", ["bob@example.org"], PAYLOAD)
+    message = str(excinfo.value)
+    assert "421 4.7.0 Service not available, closing transmission channel" in message
+    assert "temporary" in message
+
+
+def test_a_multiline_rejection_is_quoted_back_on_one_line(fake_smtp):
+    """smtplib joins a multiline reply with newlines; an error message is one line."""
+    fake_smtp.final_code = 554
+    fake_smtp.final_text = b"5.7.1 Message rejected.\nSee https://yandex.ru/support/mail\nfor why."
+    with client(fake_smtp) as smtp, pytest.raises(SendError) as excinfo:
+        smtp.send("me@yandex.ru", ["bob@example.org"], PAYLOAD)
+    message = str(excinfo.value)
+    assert "\n" not in message
+    assert "5.7.1 Message rejected. See https://yandex.ru/support/mail for why." in message
+
+
+def test_a_rejection_longer_than_the_bound_is_cut_to_it(fake_smtp):
+    """Remote text is data from a machine we do not control: bounded, always.
+
+    Asserted against a literal rather than against ``_clean``: computing the
+    expectation with the code under test would accept any bound at all, since
+    the first N characters stay a substring of an untruncated reply.
+    """
+    fake_smtp.final_code = 550
+    fake_smtp.final_text = b"5.7.1 " + b"go away " * 100
+    with client(fake_smtp) as smtp, pytest.raises(SendError) as excinfo:
+        smtp.send("me@yandex.ru", ["bob@example.org"], PAYLOAD)
+    message = str(excinfo.value)
+    expected = ("5.7.1 " + "go away " * 100)[: smtp_module.MAX_SERVER_TEXT]
+    assert expected in message
+    assert "go away go" not in message.split(expected, 1)[1]
+
+
+def test_server_text_exactly_at_the_bound_survives_intact(fake_smtp):
+    """The boundary itself: one byte over is cut, the bound itself is not."""
+    fits = b"5.7.1 " + b"a" * (smtp_module.MAX_SERVER_TEXT - 6)
+    fake_smtp.final_code = 550
+    fake_smtp.final_text = fits
+    with client(fake_smtp) as smtp, pytest.raises(SendError) as excinfo:
+        smtp.send("me@yandex.ru", ["bob@example.org"], PAYLOAD)
+    assert fits.decode() in str(excinfo.value)
+
+    fake_smtp.final_text = fits + b"a"
+    with client(fake_smtp) as smtp, pytest.raises(SendError) as excinfo:
+        smtp.send("me@yandex.ru", ["bob@example.org"], PAYLOAD)
+    assert (fits + b"a").decode() not in str(excinfo.value)
+    assert fits.decode() in str(excinfo.value)
+
+
+def test_a_rejection_after_the_body_ends_the_way_the_send_path_ends(fake_smtp):
+    """``tool._nothing_sent`` appends this sentence to anything lacking it.
+
+    Spelling it here keeps it *after* the retry guidance instead of in front of
+    it, and keeps exactly one copy of it. It is accurate: no recipient got
+    anything, so trying again cannot produce a duplicate — which is the only
+    thing that sentence is there to promise.
+    """
+    fake_smtp.final_code = 550
+    fake_smtp.final_text = b"5.1.1 no"
+    with client(fake_smtp) as smtp, pytest.raises(SendError) as excinfo:
+        smtp.send("me@yandex.ru", ["bob@example.org"], PAYLOAD)
+    message = str(excinfo.value)
+    assert message.endswith("Nothing was sent.")
+    assert message.count("Nothing was sent.") == 1
+
+
+def test_a_rejection_after_the_body_undoes_the_recipients_already_accepted(fake_smtp):
+    """One address was refused at RCPT, the rest accepted — and then the body
+    was rejected. There is no partial delivery here to report."""
+    fake_smtp.rcpt_codes = {"typo@exmaple.org": (550, b"5.1.1 no such user")}
+    fake_smtp.final_code = 554
+    fake_smtp.final_text = b"5.7.1 Message rejected"
+    with client(fake_smtp) as smtp, pytest.raises(SendError) as excinfo:
+        smtp.send("me@yandex.ru", ["bob@example.org", "typo@exmaple.org"], PAYLOAD)
+    message = str(excinfo.value)
+    assert "Nothing was delivered, to any recipient" in message
+    # What the server already told us about a bad address is the reason a
+    # retry of the same list would fail the same way, so it must survive.
+    assert "typo@exmaple.org" in message
+    assert "550" in message
+    # ...while an address that WAS accepted must not appear, or the message
+    # would read as a partial delivery.
+    assert "bob@example.org" not in message
+
+
+def test_a_rejection_after_the_body_sends_no_reset_and_still_quits(fake_smtp):
+    """The end-of-data reply ends the transaction (RFC 5321 4.1.1.4).
+
+    There is nothing to RSET, and ``close()`` still says goodbye. Pinned
+    because the absence of a command is invisible to every other assertion.
+    """
+    fake_smtp.final_code = 550
+    fake_smtp.final_text = b"5.1.1 no"
+    with client(fake_smtp) as smtp, pytest.raises(SendError):
+        smtp.send("me@yandex.ru", ["bob@example.org"], PAYLOAD)
+    assert "rset" not in fake_smtp.command_names
+    assert fake_smtp.command_names[-1] == "quit"
+
+
+def test_no_reply_at_all_after_the_body_stays_unknown(fake_smtp):
+    """The one case that is genuinely undecidable, and must stay that way."""
+    fake_smtp.fail_at = "final"
+    with client(fake_smtp) as smtp:
+        result = smtp.send("me@yandex.ru", ["bob@example.org"], PAYLOAD)
+    assert result.confirmed is False
+    assert result.accepted == ("bob@example.org",)
+
+
+def test_a_reply_that_is_neither_acceptance_nor_refusal_stays_unknown(fake_smtp):
+    """A 2xx that is not 250 may well mean the server took the message.
+
+    Calling that a refusal would invite the retry that duplicates real mail, so
+    the harmless direction is the unconfirmed one.
+    """
+    fake_smtp.final_code = 251
+    with client(fake_smtp) as smtp:
+        result = smtp.send("me@yandex.ru", ["bob@example.org"], PAYLOAD)
+    assert result.confirmed is False
+
+
+def test_an_unparseable_reply_code_stays_unknown(fake_smtp):
+    """``smtplib.SMTP.getreply`` answers -1 when the status line is not a code.
+
+    That is not a refusal, and treating it as one would invite a retry of a
+    message the server may have taken.
+    """
+    fake_smtp.final_code = -1
+    with client(fake_smtp) as smtp:
+        result = smtp.send("me@yandex.ru", ["bob@example.org"], PAYLOAD)
+    assert result.confirmed is False
+
+
+def test_a_refusal_with_no_text_still_reads_as_a_sentence(fake_smtp):
+    """Some servers answer a bare code. The message must not gain a stray gap."""
+    fake_smtp.final_code = 550
+    fake_smtp.final_text = b""
+    with client(fake_smtp) as smtp, pytest.raises(SendError) as excinfo:
+        smtp.send("me@yandex.ru", ["bob@example.org"], PAYLOAD)
+    message = str(excinfo.value)
+    assert "transmitted: 550. Nothing was delivered" in message
+
+
+def test_a_timeout_waiting_for_the_verdict_stays_unknown(fake_smtp, monkeypatch):
+    """A read timeout after the payload is the unknown case, not a refusal."""
+
+    def timeout() -> tuple[int, bytes]:
+        raise TimeoutError("timed out")
+
+    with client(fake_smtp) as smtp:
+        original = fake_smtp.getreply
+        calls = {"n": 0}
+
+        def getreply() -> tuple[int, bytes]:
+            calls["n"] += 1
+            return original() if calls["n"] == 1 else timeout()
+
+        monkeypatch.setattr(fake_smtp, "getreply", getreply)
+        result = smtp.send("me@yandex.ru", ["bob@example.org"], PAYLOAD)
+    assert result.confirmed is False
+
+
+def test_a_250_after_the_body_is_still_a_confirmed_delivery(fake_smtp):
+    """The case nothing above may disturb."""
+    with client(fake_smtp) as smtp:
+        result = smtp.send("me@yandex.ru", ["bob@example.org"], PAYLOAD)
+    assert result.confirmed is True
+    assert result.accepted == ("bob@example.org",)
+    assert result.refused == {}
+
+
 def test_saying_goodbye_can_never_fail_the_call(fake_smtp):
     def broken_quit() -> None:
         raise smtplib.SMTPServerDisconnected("already gone")
