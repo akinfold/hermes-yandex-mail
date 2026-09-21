@@ -18,6 +18,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from hermes_yandex_mail import config
+
 PACKAGE = Path(__file__).resolve().parent.parent / "hermes_yandex_mail"
 
 #: Verbatim from Hermes' ``hardcoded_secret`` rule, matched case-insensitively.
@@ -38,6 +40,13 @@ def test_no_runtime_line_looks_like_a_hardcoded_secret():
 
 
 def test_the_guard_catches_the_shape_it_is_meant_to_catch():
-    """Without this the test above passes just as well on an empty pattern."""
-    assert HARDCODED_SECRET.search('ENV_PASSWORD = "YANDEX_MAIL_APP_PASSWORD"')
+    """Without this the test above passes just as well on an empty pattern.
+
+    The offending shape is assembled from :mod:`config` rather than written out:
+    the scanner reads this file too, and spelling the 0.2.2 line here would leave
+    the repository with the one match the guard above exists to prevent. Anyone
+    installing from the repository root, or running a Hermes older than the
+    0.21.4 fix that scores test trees as context, would see it in the report.
+    """
+    assert HARDCODED_SECRET.search(f'ENV_PASSWORD = "{config.ENV_PASSWORD}"')
     assert not HARDCODED_SECRET.search('ENV_PASSWORD = _ENV_PREFIX + "APP_PASSWORD"')
