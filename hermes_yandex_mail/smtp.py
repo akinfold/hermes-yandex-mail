@@ -11,10 +11,14 @@ person is the worst outcome this module can produce.
 
 So the transaction is driven step by step, and one flag records where it got
 to: whether the server has answered ``354`` and accepted responsibility for
-what follows. Everything raised before that is "nothing was sent"; everything
-after it is "assume it was delivered, and say that the confirmation is
-missing". The flag is set just *before* the payload is written rather than
-after, deliberately: a write that fails on its first byte is then reported as
+what follows. Everything raised before that is "nothing was sent". After it,
+the reply to end-of-data decides, because under RFC 5321 §4.2.5 that reply *is*
+the verdict on the message: ``250`` is a delivery, an explicit 4xx or 5xx is
+the server declining the message — nothing reached anybody, and the caller is
+told so along with the reason — and no reply at all is the genuinely unknown
+case, "assume it was delivered, and say that the confirmation is missing". The
+flag is set just *before* the payload is written rather than after,
+deliberately: a write that fails on its first byte is then reported as
 possibly-delivered, which is the harmless direction to be wrong in. Reporting
 a delivered message as unsent is what produces a duplicate.
 
@@ -52,17 +56,27 @@ _LEADING_DOT_RE = re.compile(rb"(?m)^\.")
 
 
 class SendError(RuntimeError):
-    """Delivery did not happen. Raised only when nothing was transmitted."""
+    """Nothing was delivered, so a retry cannot produce a duplicate.
+
+    Two shapes of that: nothing was transmitted at all, or the payload went out
+    and the server then explicitly refused it. The second is still "nothing was
+    delivered" — under RFC 5321 §4.2.5 the reply to end-of-data is the verdict,
+    and a server that answers 4xx or 5xx has declined responsibility for the
+    message — but bytes did leave, so the wording must not pretend otherwise.
+    """
 
 
 @dataclass(frozen=True)
 class DeliveryResult:
     """What the server did with one submission.
 
-    ``confirmed`` is False once the server has answered ``354`` and the closing
-    ``250`` has not come back. That is not a failure: the message may well have
-    been delivered, and the caller must report it as sent-but-unconfirmed
-    rather than invite a retry.
+    ``confirmed`` is False when the payload went out and no verdict came back:
+    the connection dropped, the library raised, or the server answered
+    something that is neither the ``250`` acceptance nor a refusal. That is not
+    a failure: the message may well have been delivered, and the caller must
+    report it as sent-but-unconfirmed rather than invite a retry. An explicit
+    refusal is not this case — it is a :class:`SendError`, because then nothing
+    was delivered at all and trying again is the right thing to do.
     """
 
     accepted: tuple[str, ...]
@@ -81,6 +95,51 @@ def _refusal(code: int, raw: object) -> dict[str, object]:
     text = _clean(raw)
     match = _ENHANCED_RE.match(text)
     return {"code": code, "status": match.group(1) if match else "", "server_text": text}
+
+
+def _rejected_after_data(
+    code: int, raw: object, refused: dict[str, dict[str, object]] | None = None
+) -> str:
+    """What to say when the server refuses the message it has just been handed.
+
+    Three things have to be true at once. The bytes did leave, so this must not
+    read as if they never did. Nothing reached anybody — not even the
+    recipients accepted at RCPT — so it must not read as a partial delivery
+    either. And the retry guidance has to match the code: a 5xx will be refused
+    again until whatever caused it changes, while a 4xx is the server saying
+    "not now".
+
+    Addresses the server had already refused at RCPT are named too. They are
+    the reason a retry of the same list would fail the same way, and dropping
+    them here would lose what the previous behaviour reported in ``refused``.
+
+    It ends with ``Nothing was sent.`` deliberately. ``tool._nothing_sent``
+    appends that sentence to every refusal from this path anyway; spelling it
+    here puts it after the retry guidance instead of in front of it, keeps one
+    copy of it, and it is accurate in the sense the sentence carries — no
+    recipient got anything, so trying again cannot duplicate real mail.
+    """
+    reply = f"{code} {_clean(raw)}".strip().rstrip(".")
+    already = ""
+    if refused:
+        named = ", ".join(
+            f"{address} ({entry['code']})" for address, entry in sorted(refused.items())
+        )
+        already = (
+            f" The server had already refused {named} before the message was offered, so "
+            f"sending this list again would meet the same answer."
+        )
+    verdict = (
+        "This is a permanent refusal: the same message will be refused again until the "
+        "cause is addressed."
+        if code >= 500
+        else "This is a temporary refusal: the same message can be sent again later."
+    )
+    return (
+        f"The server refused the message after it was transmitted: {reply}. Nothing was "
+        f"delivered, to any recipient, not even the ones accepted earlier in the "
+        f"transaction.{already} {verdict} Nothing was sent."
+    )
 
 
 def _dot_stuffed(payload: bytes) -> bytes:
@@ -239,8 +298,14 @@ class YandexSMTPClient:
                     f"The connection dropped before the message was sent. ({exc})"
                 ) from exc
             return DeliveryResult(accepted=accepted, refused=refused, confirmed=False)
+        if code >= 400:
+            # An answer arrived, and it says no. The payload is on the wire,
+            # but the server declined responsibility for it, so nothing is in
+            # anyone's mailbox and nothing may be filed in Sent.
+            raise SendError(_rejected_after_data(code, resp, refused))
         if code != 250:
-            # The payload is already on the wire, so this is not "nothing was
-            # sent" however the server answers: report it as unconfirmed.
+            # Neither the acceptance nor a refusal — a 2xx the RFC does not
+            # define here, or worse. It may well mean the message was taken,
+            # so take the harmless direction and never invite a retry.
             return DeliveryResult(accepted=accepted, refused=refused, confirmed=False)
         return DeliveryResult(accepted=accepted, refused=refused, confirmed=True)

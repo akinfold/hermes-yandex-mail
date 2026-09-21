@@ -52,10 +52,15 @@ The plugin follows the Hermes plugin contract; a few of these are load-bearing:
   `YANDEX_MAIL_LOGIN`; no tool argument may influence either. Recipients come
   only from what the caller passed — never from the message being replied to,
   whose headers are written by whoever sent it.
-- **Never let a send be retried by accident.** Anything that fails before the
-  payload reaches the socket must say so plainly, and anything that fails after
-  it must report the message as sent. `smtp.py` drives the transaction by hand
-  for exactly this reason; `smtplib.send_message` cannot tell the two apart.
+- **Never let a send be retried by accident, and never hide a refusal.**
+  Anything that fails before the payload reaches the socket says so plainly.
+  After it, the reply to end-of-data decides: `250` is a delivery; an explicit
+  `4xx` or `5xx` is the server declining the message, so nothing reached anyone
+  and it is an error with no copy filed in Sent and no `\Answered` flag set;
+  and no verdict at all is the single unknown case, which must be reported as
+  sent-but-unconfirmed so nobody retries it. `smtp.py` drives the transaction
+  by hand for exactly this reason; `smtplib.send_message` cannot tell the three
+  apart.
 - **Relative imports only** in `__init__.py` — the plugin loads as
   `hermes_plugins.yandex_mail`.
 - **Address comparison** goes through `imap.normalize_email` — Yandex treats

@@ -16,6 +16,7 @@ from . import compose
 from .config import (
     ENV_LOGIN,
     ENV_SEND_TO,
+    SENDING_ACTIONS,
     MissingCredentials,
     PermissionDenied,
     account_address,
@@ -309,13 +310,20 @@ def _dump(payload: dict[str, Any]) -> str:
 
 
 def with_action_guard(action: str, handler: Any) -> Any:
-    """Recheck a registered tool's permission immediately before each call."""
+    """Recheck a registered tool's permission immediately before each call.
+
+    A refusal from the send tool goes through :func:`_nothing_sent` like every
+    other refusal on that path. The sentence is what tells an agent the call is
+    safe to try again, and a permission revoked between registration and the
+    call must not be the one refusal that omits it.
+    """
+    ending = _nothing_sent if action in SENDING_ACTIONS else str
 
     def guarded(args: dict[str, Any], **kwargs: Any) -> str:
         try:
             require_action(action)
         except PermissionDenied as exc:
-            return _error(str(exc))
+            return _error(ending(str(exc)))
         return handler(args, **kwargs)
 
     return guarded

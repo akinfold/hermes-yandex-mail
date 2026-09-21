@@ -236,6 +236,7 @@ class FakeSMTP:
         rcpt_codes: dict[str, tuple[int, bytes]] | None = None,
         data_code: int = 354,
         final_code: int = 250,
+        final_text: bytes = b"2.0.0 Ok: queued",
     ) -> None:
         #: "connect" | "mail" | "rcpt" | "putcmd" | "data" | "write" | "final"
         self.fail_at = fail_at
@@ -243,7 +244,11 @@ class FakeSMTP:
         self.mail_code = mail_code
         self.rcpt_codes = rcpt_codes or {}
         self.data_code = data_code
+        #: The reply to end-of-data — the server's verdict on the message.
+        #: Scriptable in both halves, because what the code must do with it
+        #: depends on the class of the code *and* on what the text says.
         self.final_code = final_code
+        self.final_text = final_text
         self.calls: list[tuple[str, Any]] = []
         self.written: bytes = b""
         self._next_reply: tuple[int, bytes] | None = None
@@ -299,7 +304,7 @@ class FakeSMTP:
         if self.fail_at == "final":
             raise FakeSMTPError("Server not connected")
         self.calls.append(("getreply", self.final_code))
-        return self.final_code, b"2.0.0 Ok: queued"
+        return self.final_code, self.final_text
 
     def send(self, payload: bytes) -> None:
         self.calls.append(("send", len(payload)))

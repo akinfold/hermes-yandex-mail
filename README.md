@@ -281,10 +281,31 @@ the two worth reading: a message asking for replies at an address it was not
 sent from is the standard shape of a phishing redirect, and the tool says so in
 `notes` rather than deciding for you.
 
-`delivery` is `unconfirmed` when the message went out but the server never
-acknowledged it. That is not a failure and must not be retried — sending again
-would deliver a second copy. Anything that goes wrong *before* the message is
-written says "Nothing was sent" and is safe to try again.
+**Once the message has been written, three things can happen**, and the result
+says which. The reply the server gives to the finished message is its verdict
+on the whole thing, so those three are genuinely different outcomes:
+
+- **`"delivery": "confirmed"`** — the server answered `250` and took the
+  message on. It is out of your hands now.
+- **An error quoting what the server said.** The server answered the finished
+  message with a `4xx` or a `5xx`, which means it declined to take it on:
+  nothing was delivered, to anybody — not even to the recipients it accepted a
+  moment earlier — and no copy is filed in Sent. The error carries the code and
+  the server's own words, so `554 5.7.1 Message rejected under suspicion of
+  SPAM` reaches you as itself. A `5xx` will be refused the same way until the
+  cause is addressed; a `4xx` is the server saying "not now", and the same
+  message can be sent again later.
+- **`"delivery": "unconfirmed"`** — the message went out and no verdict came
+  back: either no reply at all, because the connection dropped, or a reply that
+  is neither the `250` acceptance nor a `4xx`/`5xx` refusal. This is the one
+  genuinely unknown outcome. It is not a failure and must not be retried: the
+  message may well have arrived, and sending it again would deliver a second
+  copy.
+
+Every error from sending ends with "Nothing was sent" — whether it failed
+before a single byte was written or the server refused the finished message,
+nobody received anything, so trying again cannot deliver a duplicate.
+`unconfirmed` is the only outcome that carries that risk.
 
 Plain text only: no HTML, no attachments, and no Cc or Bcc — every recipient goes
 in `to`, and an argument the tool does not know (`cc`, `bcc`, `from`,
