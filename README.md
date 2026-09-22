@@ -14,7 +14,7 @@ Yandex inbox.** *"What came in overnight?"* — *"Read me the one from the bank.
 your real mailbox, over IMAP, with no third-party service in the middle.
 
 - 📬 **Seven tools, one toolset** — list folders with unread counts, search, read
-  (body plus attachment inventory), flag, move, delete, and — only if you switch
+  (paged text plus attachment list), flag, move, delete, and — only if you switch
   it on — send.
 - ✉️ **Sending is off until you name it** — `send_message` is not in `all` and not
   granted by leaving the allow-list empty, so upgrading never hands a running
@@ -73,7 +73,7 @@ Up to seven standalone tools, in the `yandex_mail` toolset:
 |---|---|
 | `yandex_mail_list_folders` | List folders with their role (inbox, sent, trash, junk, drafts, archive) and total/unread counts. |
 | `yandex_mail_search_messages` | Search a folder by sender, recipient, subject, full text, date range, unread or flagged state; returns subject, addresses, date, size, flags, and the `uid`. Pages with `offset`, and reports `total` so you know whether more exist. |
-| `yandex_mail_read_message` | Read one message: headers, text body (HTML-only mail is converted to text), and the attachment list. Peeks by default. |
+| `yandex_mail_read_message` | Read one message: headers, the text body in pages (HTML-only mail is converted to text), and the attachment list. Attachments are not downloaded. Peeks by default. |
 | `yandex_mail_mark_message` | Mark messages read/unread and flagged/unflagged. |
 | `yandex_mail_move_message` | Move messages to another folder, reporting which UID each message was verified to have on arrival. |
 | `yandex_mail_delete_message` | Delete messages — to Trash by default. A message already there is left untouched; permanent deletion is a separate, irreversible request. |
@@ -97,6 +97,33 @@ case-sensitive and would simply answer *"No such folder"*.
 
 Sending goes over **SMTP** (`smtp.yandex.ru:465`) with the same app password, and
 is off unless you switch it on — see [Sending mail](#sending-mail).
+
+### Reading long messages
+
+`yandex_mail_read_message` returns the body a page at a time: 20 000 characters
+by default, up to 100 000 with `max_chars`. While the result says `eof: false`,
+the next call passes its `next_offset` as `offset`:
+
+```json
+{"uid": "101", "folder": "INBOX", "offset": 20000}
+```
+
+Offsets count characters of the text the tool returns — after an HTML body has
+been converted — so the pages join back together exactly. On the last page `eof`
+is `true` and `next_offset` is `null`.
+
+Only the text parts of a message are downloaded, in blocks of 64 KiB, and never
+its attachments: a message carrying a 25 MB attachment reads as quickly as one
+without. The plain-text body is preferred over an HTML one, and the text of a
+forwarded message is part of the body. Attachments are listed with a `part_id`,
+name, MIME type, and a `size` estimated from their encoded size on the server,
+which can be off by a few bytes.
+
+Paging keeps no copy of your mail: every page decodes the text from its
+beginning again, so a deep page of a very long message costs more time and
+traffic than the first. A structure description over 1 MiB, nesting deeper than
+40 levels, or a character-set decoder holding more than 64 KiB is refused with an
+error rather than buffered.
 
 ## Configuration
 
@@ -171,6 +198,9 @@ nothing recognisable therefore registers nothing at all. Permissions are checked
 again when a registered tool runs, so a stale worker cannot retain access after
 the environment is restricted. Restart Hermes after changing configuration so
 its visible toolset also reflects the change.
+
+Reading with `mark_read=true` also requires `mark_message` permission. The `read`
+group alone always leaves the message's read/unread state unchanged.
 
 Pair it with `YANDEX_MAIL_FOLDERS` to fence off the rest of the mailbox: with
 `YANDEX_MAIL_FOLDERS=INBOX`, every other folder is invisible to the agent and
@@ -354,16 +384,15 @@ is off, or the app password lacks the Mail scope.
   verified to have on arrival. Use it rather than searching — Yandex cannot
   search by `Message-ID`. A message that could not be verified is simply absent
   from the map, never guessed.
+- **Reading is paged.** Only the text parts are fetched, never the attachments.
+  Continue with `next_offset` to read beyond the page limit; a large attachment
+  does not force a whole-message download. See
+  [Reading long messages](#reading-long-messages).
 - **The TLS certificate and hostname are verified**, and every connection
   carries a 30-second timeout. A private or self-signed CA is supplied the
   standard way, via `SSL_CERT_FILE` / `SSL_CERT_DIR`; there is no setting for
   turning verification off. *(Releases 0.1.0 and 0.2.0 did not verify — see
   [Security](#security).)*
-- **Attachments are listed, not downloaded** — name, MIME type, and size. The
-  body is capped (20 000 characters by default, raised with `max_chars` up to
-  100 000) and says when it was truncated. A message whose raw size exceeds
-  10 MiB, typically one carrying large attachments, is refused outright rather
-  than read.
 - **Yandex' SMTP does not advertise `SMTPUTF8`,** so an address with non-ASCII
   characters in it cannot be sent to at all. It is refused with a sentence
   saying why, rather than failing somewhere inside the standard library.

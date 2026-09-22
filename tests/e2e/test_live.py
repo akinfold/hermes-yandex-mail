@@ -11,6 +11,7 @@ the test account, so mail is sent but never to a third party.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import json
 import time
@@ -215,6 +216,153 @@ def test_flags_round_trip(client, planted):
     client.store_flags(folder, [uid], add=["\\Seen"], remove=["\\Flagged"])
     restored = client.summary(folder, uid)
     assert restored is not None and restored.seen and not restored.flagged
+
+
+def _read_pages(uid: str, max_chars: int) -> tuple[str, int, dict]:
+    """Read a message page by page; return the joined body, the call count, the last page."""
+    text, offset = [], 0
+    for calls in range(1, 101):
+        payload = json.loads(
+            tool.handle_read(
+                {"uid": uid, "folder": "INBOX", "offset": offset, "max_chars": max_chars}
+            )
+        )
+        assert "error" not in payload, payload
+        page = payload["message"]
+        text.append(page["body"])
+        if page["eof"]:
+            return "".join(text), calls, page
+        offset = page["next_offset"]
+    raise AssertionError("the message never reached eof")
+
+
+def test_text_pages(planted):
+    full = json.loads(tool.handle_read({"uid": planted["uid"], "folder": "INBOX"}))["message"]
+    text, calls, _page = _read_pages(planted["uid"], 10)
+    assert text == full["body"]
+    assert calls > 1
+
+
+#: The first cut of paging broke on each of these shapes of real mail, where
+#: reading the whole message had not. Each is planted as Yandex receives it.
+_ATTACHMENT = bytes(range(256)) * 1200
+_LONG_LINE = "Длинное письмо, строка {:06d}: the quick brown fox jumps over the lazy dog."
+_LONG_BODY = "\n".join(_LONG_LINE.format(n) for n in range(2400))
+
+
+def _sample_messages(account: str, marker: str) -> dict[str, bytes]:
+    def message(name: str) -> EmailMessage:
+        sample = EmailMessage()
+        sample["Subject"] = f"[{MARKER_PREFIX}] {marker} {name}"
+        sample["Message-ID"] = make_msgid(domain="hermes-yandex-mail.test")
+        sample["From"] = account
+        sample["To"] = account
+        return sample
+
+    attachment = message("cyrillic attachment name")
+    attachment.set_content("See attached.\n")
+    attachment.add_attachment(
+        _ATTACHMENT, maintype="application", subtype="pdf", filename="Отчёт за сентябрь.pdf"
+    )
+    inner = message("forwarded inner")
+    inner.set_content("Forwarded text survives.\n")
+    inner.add_alternative("<p>Forwarded <b>html</b></p>", subtype="html")
+    forwarded = message("forwarded")
+    forwarded.set_content("Outer text.\n")
+    forwarded.add_attachment(inner)
+    image = base64.b64encode(bytes(range(256)) * 400).decode()
+    inline_image = message("inline image")
+    inline_image.set_content(
+        f'<p>Before image.</p><img src="data:image/png;base64,{image}"><p>After image.</p>',
+        subtype="html",
+        cte="base64",
+    )
+    unclosed = message("unclosed script")
+    unclosed.set_content(
+        "<p>Visible start.</p><script>var x = 1;<p>Text after an unclosed script.</p>",
+        subtype="html",
+    )
+    long = message("long body")
+    long.set_content(_LONG_BODY, cte="base64")
+    samples = {
+        name: sample.as_bytes()
+        for name, sample in {
+            "attachment": attachment,
+            "forwarded": forwarded,
+            "inline_image": inline_image,
+            "unclosed_script": unclosed,
+            "long": long,
+        }.items()
+    }
+    for name, body in {
+        "unpadded": b"VW5wYWRkZWQgYm9keS4",
+        "concatenated": base64.b64encode(b"First block. ") + base64.b64encode(b"Second block."),
+    }.items():
+        samples[name] = (
+            (
+                f"Subject: [{MARKER_PREFIX}] {marker} {name} base64\r\n"
+                f"Message-ID: {make_msgid(domain='hermes-yandex-mail.test')}\r\n"
+                f"From: {account}\r\nTo: {account}\r\nMIME-Version: 1.0\r\n"
+                "Content-Type: text/plain; charset=utf-8\r\n"
+                "Content-Transfer-Encoding: base64\r\n\r\n"
+            ).encode()
+            + body
+            + b"\r\n"
+        )
+    return samples
+
+
+@pytest.fixture(scope="module")
+def samples(account):
+    """Plant the sample messages once, and guarantee they are gone afterwards."""
+    marker = uuid.uuid4().hex[:12]
+    uids: dict[str, str] = {}
+    try:
+        with config.build_client() as live:
+            for name, raw in _sample_messages(account, marker).items():
+                uids[name] = live.append("INBOX", raw, flags=["\\Seen"])
+        yield uids
+    finally:
+        _purge_everywhere(marker)
+
+
+def test_a_cyrillic_attachment_name_is_decoded(samples):
+    _text, _calls, message = _read_pages(samples["attachment"], 20000)
+    [attachment] = message["attachments"]
+    assert attachment["filename"] == "Отчёт за сентябрь.pdf"
+    assert attachment["content_type"] == "application/pdf"
+    assert abs(attachment["size"] - len(_ATTACHMENT)) < 4, attachment
+
+
+def test_a_long_body_pages_back_exactly(samples):
+    text, calls, _page = _read_pages(samples["long"], 50000)
+    assert text == _LONG_BODY
+    assert calls == 4
+
+
+def test_the_text_of_a_forwarded_message_is_read(samples):
+    text, _calls, message = _read_pages(samples["forwarded"], 20000)
+    assert text == "Outer text.\nForwarded text survives."
+    assert [a["content_type"] for a in message["attachments"]] == ["message/rfc822"]
+
+
+def test_an_inline_image_does_not_stop_the_read(samples):
+    text, _calls, message = _read_pages(samples["inline_image"], 20000)
+    assert text == "Before image.\nAfter image."
+    assert message["body_from_html"] is True
+
+
+def test_an_unclosed_script_does_not_hide_the_rest(samples):
+    text, _calls, _message = _read_pages(samples["unclosed_script"], 20000)
+    assert "Text after an unclosed script." in text
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [("unpadded", "Unpadded body."), ("concatenated", "First block. Second block.")],
+)
+def test_sloppy_base64_still_reads(samples, name, expected):
+    assert _read_pages(samples[name], 20000)[0] == expected
 
 
 def test_move_to_trash_then_purge(client, planted):
