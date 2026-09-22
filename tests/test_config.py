@@ -108,12 +108,14 @@ def test_allowed_actions(env, raw, expected):
 def test_action_groups_cover_every_action():
     """Every action is reachable by a group — except the ones that need naming.
 
-    ``send_message`` has no group of its own on purpose: a shorthand for it
-    would be a short word an earlier configuration might already contain.
+    ``send_message`` and ``save_attachment`` have no group of their own on
+    purpose: a shorthand would be a short word an earlier configuration might
+    already contain.
     """
     covered = set().union(*(v for k, v in config.ACTION_GROUPS.items() if k != "all"))
-    assert covered == set(config.ACTIONS) - config.SENDING_ACTIONS
+    assert covered == set(config.ACTIONS) - config.OPT_IN_ACTIONS
     assert set(config.SENDING_ACTIONS) == {"send_message"}
+    assert set(config.OPT_IN_ACTIONS) == {"send_message", "save_attachment"}
 
 
 # -- sending is the one action an empty allow-list does not grant ------------

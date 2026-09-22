@@ -19,7 +19,7 @@
 - [ ] `pytest` passes and new code / error paths are covered by tests
 - [ ] `radon cc -s -n C hermes_yandex_mail` prints nothing
 - [ ] README / docs updated for any user-facing change
-- [ ] `imap.py`, `imap_utf7.py`, `message.py`, `mime.py`, `paging.py`, `html_text.py`, `compose.py`, and `smtp.py` still have no Hermes imports
+- [ ] `imap.py`, `imap_utf7.py`, `message.py`, `mime.py`, `paging.py`, `html_text.py`, `attachment.py`, `compose.py`, and `smtp.py` still have no Hermes imports
 - [ ] Tool handlers still return a JSON string on every path, including failures
 - [ ] Nothing new can destroy a message: copies precede deletions, expunge stays UID-scoped
 

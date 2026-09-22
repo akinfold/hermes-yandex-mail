@@ -1,12 +1,13 @@
 name: yandex_mail
 version: 0.3.4
-description: "Search, read, flag, move, and delete Yandex Mail messages over IMAP, and send over SMTP. Requires YANDEX_MAIL_LOGIN and YANDEX_MAIL_APP_PASSWORD; YANDEX_MAIL_ACTIONS restricts which tools are exposed, and sending is off unless it names send_message explicitly."
+description: "Search, read, flag, move, and delete Yandex Mail messages over IMAP, save attachments to files, and send over SMTP. Requires YANDEX_MAIL_LOGIN and YANDEX_MAIL_APP_PASSWORD; YANDEX_MAIL_ACTIONS restricts which tools are exposed, and saving attachments and sending are off unless it names save_attachment and send_message explicitly."
 author: akinfold
 kind: standalone
 provides_tools:
   - yandex_mail_list_folders
   - yandex_mail_search_messages
   - yandex_mail_read_message
+  - yandex_mail_save_attachment
   - yandex_mail_mark_message
   - yandex_mail_move_message
   - yandex_mail_delete_message

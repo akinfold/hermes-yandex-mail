@@ -27,12 +27,37 @@ def _register_with(monkeypatch, actions: str) -> list[str]:
     return [t["name"] for t in ctx.tools]
 
 
-def test_registers_every_tool_except_sending_by_default(monkeypatch):
+def test_registers_every_tool_except_the_opt_in_ones_by_default(monkeypatch):
     names = _register_with(monkeypatch, "")
     assert names == [
-        f"yandex_mail_{action}" for action in config.ACTIONS if action not in config.SENDING_ACTIONS
+        f"yandex_mail_{action}" for action in config.ACTIONS if action not in config.OPT_IN_ACTIONS
     ]
     assert "yandex_mail_send_message" not in names
+    assert "yandex_mail_save_attachment" not in names
+
+
+@pytest.mark.parametrize("actions", ["", "   ", "all", "read", "read,write,delete"])
+def test_saving_attachments_is_absent_unless_named(monkeypatch, actions):
+    assert "yandex_mail_save_attachment" not in _register_with(monkeypatch, actions)
+
+
+@pytest.mark.parametrize(
+    "actions",
+    [
+        "save_attachment",
+        "read,save_attachment",
+        "all,SAVE_ATTACHMENT",
+        "yandex_mail_save_attachment",
+    ],
+)
+def test_saving_attachments_appears_only_when_it_is_named(monkeypatch, actions):
+    assert "yandex_mail_save_attachment" in _register_with(monkeypatch, actions)
+
+
+@pytest.mark.parametrize("token", ["attachments", "attachment", "save", "files"])
+def test_no_short_word_grants_saving_attachments(monkeypatch, token):
+    """Upgrading must not turn a previously-ignored word into a live grant."""
+    assert "yandex_mail_save_attachment" not in _register_with(monkeypatch, f"read,{token}")
 
 
 @pytest.mark.parametrize("actions", ["all,send_message", "send_message", "read,send_message"])

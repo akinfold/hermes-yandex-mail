@@ -861,12 +861,18 @@ class YandexIMAPClient:
         except (ValueError, TypeError, IndexError) as exc:
             raise MailError(f"Cannot parse MIME structure: {exc}") from exc
 
-    def iter_part(self, folder: str, uid: str, part_id: str) -> Iterator[bytes]:
-        """Stream one encoded MIME section in bounded, non-mutating requests."""
+    def iter_part(
+        self, folder: str, uid: str, part_id: str, chunk_size: int = 65536
+    ) -> Iterator[bytes]:
+        """Stream one encoded MIME section in bounded, non-mutating requests.
+
+        Each request asks for ``chunk_size`` bytes: small for reading text a page
+        at a time, larger for saving a whole attachment in fewer round trips.
+        """
         if not re.fullmatch(r"[1-9][0-9]*(?:\.[1-9][0-9]*)*", part_id):
             raise MailError("Invalid MIME part_id.")
         self._select(self.check_folder(folder), readonly=True)
-        offset, count = 0, 65536
+        offset, count = 0, chunk_size
         while True:
             data = self._uid(
                 "FETCH part", "FETCH", uid, f"(UID BODY.PEEK[{part_id}]<{offset}.{count}>)"

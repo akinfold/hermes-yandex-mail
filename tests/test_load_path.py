@@ -25,6 +25,7 @@ MANIFEST_TOOLS = {
     "yandex_mail_list_folders",
     "yandex_mail_search_messages",
     "yandex_mail_read_message",
+    "yandex_mail_save_attachment",
     "yandex_mail_mark_message",
     "yandex_mail_move_message",
     "yandex_mail_delete_message",
@@ -32,9 +33,12 @@ MANIFEST_TOOLS = {
 }
 
 #: What an unconfigured deployment actually gets. Deliberately NOT the same
-#: set: sending is opt-in, so it is advertised but not registered until
-#: YANDEX_MAIL_ACTIONS names it.
-DEFAULT_REGISTERED_TOOLS = MANIFEST_TOOLS - {"yandex_mail_send_message"}
+#: set: sending and saving attachments are opt-in, so they are advertised but
+#: not registered until YANDEX_MAIL_ACTIONS names them.
+DEFAULT_REGISTERED_TOOLS = MANIFEST_TOOLS - {
+    "yandex_mail_send_message",
+    "yandex_mail_save_attachment",
+}
 
 
 class FakeCtx:
@@ -105,12 +109,15 @@ def test_the_three_version_files_agree():
     assert version == _load_as_hermes_would().__version__ == str(manifest["version"])
 
 
-def test_sending_is_advertised_but_not_registered_by_default():
-    """The one action a fresh install does not get.
+def test_the_opt_in_tools_are_advertised_but_not_registered_by_default():
+    """The actions a fresh install does not get.
 
     Stated here as its own assertion rather than left implicit in the two sets
     above, because it is the property an upgrade must not quietly change:
-    installing 0.3.0 over 0.2.x must not hand a running agent the ability to
-    write as the account owner.
+    installing a new version must not hand a running agent the content of
+    attachments, or the ability to write as the account owner.
     """
-    assert set(MANIFEST_TOOLS - DEFAULT_REGISTERED_TOOLS) == {"yandex_mail_send_message"}
+    assert set(MANIFEST_TOOLS - DEFAULT_REGISTERED_TOOLS) == {
+        "yandex_mail_send_message",
+        "yandex_mail_save_attachment",
+    }

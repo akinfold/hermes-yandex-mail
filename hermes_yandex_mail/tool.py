@@ -13,7 +13,8 @@ from email.message import EmailMessage
 from email.utils import make_msgid
 from typing import Any
 
-from . import compose
+from . import attachment, compose
+from ._compat import agent_visible_path, document_cache_dir
 from .config import (
     ENV_LOGIN,
     ENV_SEND_TO,
@@ -23,6 +24,7 @@ from .config import (
     account_address,
     allowed_actions,
     allowed_send_recipients,
+    attachment_max_bytes,
     build_client,
     build_smtp_client,
     require_action,
@@ -162,6 +164,37 @@ READ_SCHEMA: dict[str, Any] = {
             },
         },
         "required": ["uid", "folder"],
+    },
+}
+
+SAVE_ATTACHMENT_SCHEMA: dict[str, Any] = {
+    "name": "yandex_mail_save_attachment",
+    "description": (
+        "Save one attachment of a message to a file, and return where it is: the path, the "
+        "attachment's name and type, its size and SHA-256. The content itself is not "
+        "returned. Take part_id from the attachment list of yandex_mail_read_message. Saved "
+        "files are kept for 24 hours."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "uid": {
+                "type": "string",
+                "description": (
+                    "The UID of the message the attachment belongs to, from a previous result. "
+                    "Must be paired with the 'folder' that result reported the UID in."
+                ),
+            },
+            "folder": {"type": "string", "description": _REQUIRED_FOLDER_HINT},
+            "part_id": {
+                "type": "string",
+                "description": (
+                    "The attachment's part_id, exactly as yandex_mail_read_message listed it "
+                    "(e.g. '2' or '1.3')."
+                ),
+            },
+        },
+        "required": ["uid", "folder", "part_id"],
     },
 }
 
@@ -533,6 +566,77 @@ def handle_read(args: dict[str, Any], **_kwargs: Any) -> str:
         return _error(str(exc))
     except Exception as exc:
         return _error(f"Unexpected error reading message: {exc}")
+
+
+#: How long a saved attachment is kept. The gateway prunes Hermes' document
+#: cache on the same schedule, but the CLI and TUI never do, so each save also
+#: removes this plugin's own files older than this.
+_SAVED_FILE_MAX_AGE = 24 * 3600
+#: Bytes asked for per request while saving: fewer round trips than reading text.
+_SAVE_CHUNK = 512 * 1024
+
+
+def _listed_attachment(parts: list[MimePart], uid: str, folder: str, part_id: str) -> MimePart:
+    """The attachment ``part_id`` names, only if read_message would list it."""
+    for part in parts:
+        if part.attachment and part.part_id == part_id:
+            return part
+    raise ValueError(
+        f"Message {uid} in {folder} has no attachment with part_id {part_id!r}. Use a "
+        "part_id from the attachment list of yandex_mail_read_message."
+    )
+
+
+def _saved_name(part: MimePart) -> str:
+    if part.filename:
+        return part.filename
+    # A forwarded message is worth more with an extension a mail client opens.
+    return f"message-{part.part_id}.eml" if part.content_type == "message/rfc822" else ""
+
+
+def handle_save_attachment(args: dict[str, Any], **_kwargs: Any) -> str:
+    try:
+        uid = _uids(args)[0]
+        folder_arg = _required_folder(args)
+        part_id = str(args.get("part_id") or "").strip()
+        if not part_id:
+            raise ValueError(
+                "'part_id' is required: take it from the attachment list of "
+                "yandex_mail_read_message."
+            )
+        max_bytes = attachment_max_bytes()
+        with build_client() as client:
+            folder = client.resolve_folder(client.check_folder(folder_arg))
+            part = _listed_attachment(client.message_parts(folder, uid), uid, folder, part_id)
+            directory = document_cache_dir()
+            attachment.prune(directory, _SAVED_FILE_MAX_AGE)
+            raw = client.iter_part(folder, uid, part.part_id, chunk_size=_SAVE_CHUNK)
+            saved = attachment.save(
+                decoded_chunks(raw, part.encoding),
+                directory,
+                attachment.safe_filename(_saved_name(part), part.part_id),
+                max_bytes,
+            )
+        return _dump(
+            {
+                "attachment": {
+                    "uid": uid,
+                    "folder": folder,
+                    "part_id": part.part_id,
+                    "filename": part.filename or "(unnamed)",
+                    "content_type": part.content_type,
+                    "size": saved.size,
+                    "sha256": saved.sha256,
+                    "path": agent_visible_path(saved.path),
+                }
+            }
+        )
+    except MissingCredentials as exc:
+        return _error(str(exc))
+    except (MailError, PermissionDenied, ValueError, OSError) as exc:
+        return _error(str(exc))
+    except Exception as exc:
+        return _error(f"Unexpected error saving attachment: {exc}")
 
 
 def _flag_changes(args: dict[str, Any]) -> tuple[list[str], list[str]]:

@@ -13,6 +13,12 @@ from .message import decode_header_value
 _EXTENDED_VALUE = re.compile(r"([A-Za-z0-9!#$&+^_`{}~-]+)'[A-Za-z0-9-]*'(.*)", re.DOTALL)
 
 
+#: Matched in place rather than on a slice, so a large literal is not copied
+#: once for every token in front of it.
+_ATOM = re.compile(rb"[^\s()]+")
+_LITERAL = re.compile(rb"\{([0-9]+)\}\r\n")
+
+
 class MessageNotFound(ValueError):
     """The server answered the FETCH with nothing for the requested UID."""
 
@@ -40,7 +46,7 @@ class StructureParser:
             return self.quoted()
         if char == b"{":
             return self.literal()
-        match = re.match(rb"[^\s()]+", self.data[self.pos :])
+        match = _ATOM.match(self.data, self.pos)
         if match is None:
             raise ValueError("Invalid MIME structure token.")
         self.pos += len(match[0])
@@ -75,7 +81,7 @@ class StructureParser:
         raise ValueError("Unterminated MIME string.")
 
     def literal(self):
-        match = re.match(rb"\{([0-9]+)\}\r\n", self.data[self.pos :])
+        match = _LITERAL.match(self.data, self.pos)
         if match is None:
             raise ValueError("Invalid MIME literal.")
         self.pos += len(match[0])
