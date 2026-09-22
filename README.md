@@ -13,12 +13,16 @@ Yandex inbox.** *"What came in overnight?"* — *"Read me the one from the bank.
 *"File everything from GitHub into Archive and mark it read."* The agent works on
 your real mailbox, over IMAP, with no third-party service in the middle.
 
-- 📬 **Seven tools, one toolset** — list folders with unread counts, search, read
+- 📬 **Eight tools, one toolset** — list folders with unread counts, search, read
   (paged text plus attachment list), flag, move, delete, and — only if you switch
-  it on — send.
-- ✉️ **Sending is off until you name it** — `send_message` is not in `all` and not
-  granted by leaving the allow-list empty, so upgrading never hands a running
-  agent the ability to write as you.
+  them on — save attachments to files and send.
+- 📎 **Attachments become files, never context** — the agent saves one to Hermes'
+  document cache and gets back its path, so a PDF can be opened by other tools
+  or sent to you in chat without its bytes passing through the model.
+- ✉️ **Sending and saving are off until you name them** — `send_message` and
+  `save_attachment` are not in `all` and not granted by leaving the allow-list
+  empty, so upgrading never hands a running agent the ability to write as you,
+  or the content of your attachments.
 - 🔒 **You choose what it may touch** — restrict it to specific folders, and to
   specific actions (`read`, `read,write`, …). A disallowed action is not in the
   toolset at all, so the model cannot be talked into calling it.
@@ -67,13 +71,14 @@ That's it. Ask the agent *"anything unread in my inbox?"* and it will tell you.
 
 ## The tools
 
-Up to seven standalone tools, in the `yandex_mail` toolset:
+Up to eight standalone tools, in the `yandex_mail` toolset:
 
 | Tool | Purpose |
 |---|---|
 | `yandex_mail_list_folders` | List folders with their role (inbox, sent, trash, junk, drafts, archive) and total/unread counts. |
 | `yandex_mail_search_messages` | Search a folder by sender, recipient, subject, full text, date range, unread or flagged state; returns subject, addresses, date, size, flags, and the `uid`. Pages with `offset`, and reports `total` so you know whether more exist. |
 | `yandex_mail_read_message` | Read one message: headers, the text body in pages (HTML-only mail is converted to text), and the attachment list. Attachments are not downloaded. Peeks by default. |
+| `yandex_mail_save_attachment` | **Off by default.** Save one attachment to a file in Hermes' document cache and return its path, name, type, size and SHA-256 — never its content. |
 | `yandex_mail_mark_message` | Mark messages read/unread and flagged/unflagged. |
 | `yandex_mail_move_message` | Move messages to another folder, reporting which UID each message was verified to have on arrival. |
 | `yandex_mail_delete_message` | Delete messages — to Trash by default. A message already there is left untouched; permanent deletion is a separate, irreversible request. |
@@ -84,7 +89,7 @@ Yandex Mail has no public REST API, so this plugin speaks **IMAP**
 clients. Nothing is proxied through anyone else's servers.
 
 Messages are addressed by `folder` + `uid`, and **both are required** for read,
-mark, move, and delete: UID numbering is independent per folder, so a UID paired
+save, mark, move, and delete: UID numbering is independent per folder, so a UID paired
 with the wrong folder would silently name a different message. Every result
 reports the folder in the server's own spelling — pass that value straight back.
 Several UIDs can be given at once, comma-separated: `"101,102"`; they are acted
@@ -96,7 +101,8 @@ Folder names are matched generously on the way in — `spam`, `Spam`, `junk` and
 case-sensitive and would simply answer *"No such folder"*.
 
 Sending goes over **SMTP** (`smtp.yandex.ru:465`) with the same app password, and
-is off unless you switch it on — see [Sending mail](#sending-mail).
+is off unless you switch it on — see [Sending mail](#sending-mail). So is saving
+attachments — see [Saving attachments](#saving-attachments).
 
 ### Reading long messages
 
@@ -117,7 +123,8 @@ its attachments: a message carrying a 25 MB attachment reads as quickly as one
 without. The plain-text body is preferred over an HTML one, and the text of a
 forwarded message is part of the body. Attachments are listed with a `part_id`,
 name, MIME type, and a `size` estimated from their encoded size on the server,
-which can be off by a few bytes.
+which can be off by a few bytes. To get one as a file, see
+[Saving attachments](#saving-attachments).
 
 Paging keeps no copy of your mail: every page decodes the text from its
 beginning again, so a deep page of a very long message costs more time and
@@ -134,10 +141,11 @@ error rather than buffered.
 | `YANDEX_MAIL_IMAP_HOST` | no | `imap.yandex.ru` | Override for a Yandex 360 domain or for testing. |
 | `YANDEX_MAIL_IMAP_PORT` | no | `993` | IMAP over TLS. |
 | `YANDEX_MAIL_FOLDERS` | no | *(all)* | Comma-separated allow-list of folders, spelled as `yandex_mail_list_folders` reports them; case is ignored, but role words and synonyms such as `sent` or `spam` are **not** expanded here, so on an account whose Sent folder carries a localised name, that localised name is the one to list. The first entry is the default folder. |
-| `YANDEX_MAIL_ACTIONS` | no | *(all but sending)* | Comma-separated allow-list of actions the agent may perform — see below. |
+| `YANDEX_MAIL_ACTIONS` | no | *(all but sending and saving attachments)* | Comma-separated allow-list of actions the agent may perform — see below. |
 | `YANDEX_MAIL_SMTP_HOST` | no | `smtp.yandex.ru` | Override for a Yandex 360 domain or for testing. |
 | `YANDEX_MAIL_SMTP_PORT` | no | `465` | SMTP over implicit TLS. |
 | `YANDEX_MAIL_SEND_TO` | no | *(any address)* | Comma-separated fence on who may be written to: full addresses, or `@domain` for a whole domain. A value that is set but names nothing usable — whitespace, or nothing after the `=` — refuses **every** recipient; only removing the variable removes the fence. |
+| `YANDEX_MAIL_ATTACHMENT_MAX_BYTES` | no | `104857600` (100 MiB) | The largest attachment `yandex_mail_save_attachment` will save, in bytes. A value that is not a positive whole number — `100MB`, say — refuses every save rather than falling back to the default. |
 
 Credentials are read from the environment first, then from `~/.hermes/.env`, so
 they work in gateway and subprocess runs. Secret values are never logged.
@@ -148,13 +156,13 @@ and decoded for you.
 
 ### Restricting what the agent can do
 
-`YANDEX_MAIL_ACTIONS` decides which of the seven tools are registered at all. A
+`YANDEX_MAIL_ACTIONS` decides which of the eight tools are registered at all. A
 disallowed action is not merely refused at call time: the tool never appears in
 the agent's toolset, so it cannot be invoked, and the model is not tempted to try.
 
 Accepted values, comma-separated and case-insensitive — individual actions
-(`list_folders`, `search_messages`, `read_message`, `mark_message`,
-`move_message`, `delete_message`, `send_message`), full tool names
+(`list_folders`, `search_messages`, `read_message`, `save_attachment`,
+`mark_message`, `move_message`, `delete_message`, `send_message`), full tool names
 (`yandex_mail_delete_message`), or the shorthands:
 
 | Shorthand | Expands to |
@@ -162,7 +170,7 @@ Accepted values, comma-separated and case-insensitive — individual actions
 | `read` | `list_folders`, `search_messages`, `read_message` |
 | `write` | `mark_message`, `move_message` |
 | `delete` | `delete_message` |
-| `all` | every action **except** `send_message` (the default) |
+| `all` | every action **except** `save_attachment` and `send_message` (the default) |
 
 `read_message` with `mark_read=true` changes the `\Seen` flag, so it also needs
 `mark_message`. Under `YANDEX_MAIL_ACTIONS=read` such a call is refused and
@@ -179,18 +187,23 @@ YANDEX_MAIL_ACTIONS=read,write
 YANDEX_MAIL_ACTIONS=list_folders,search_messages
 ```
 
-Leave it unset for the six reading and organising tools. **Sending is the one
-exception to "unset means everything"**: `send_message` has to be named, either
-on its own or alongside a shorthand —
+Leave it unset for the six reading and organising tools. **Saving attachments
+and sending are the two exceptions to "unset means everything"**: each has to be
+named, either on its own or alongside a shorthand —
 
 ```dotenv
-YANDEX_MAIL_ACTIONS=all,send_message
+# Read mail and save attachments as files, change nothing:
+YANDEX_MAIL_ACTIONS=read,save_attachment
+
+# Everything:
+YANDEX_MAIL_ACTIONS=all,save_attachment,send_message
 ```
 
-There is deliberately no short `send` spelling. A short word could already be
-sitting in somebody's configuration from before the action existed, where it was
-silently ignored; giving it meaning now would switch sending on by upgrading
-alone, which is precisely what this gate exists to prevent.
+There is deliberately no short spelling for either — no `send`, no
+`attachments`. A short word could already be sitting in somebody's configuration
+from before the action existed, where it was silently ignored; giving it meaning
+now would switch the action on by upgrading alone, which is precisely what these
+gates exist to prevent.
 
 A name that matches nothing is ignored, so a
 typo can only ever withhold a tool, never grant one — and a value that names
@@ -211,6 +224,47 @@ moves the message into the folder the server flags as Trash, and a sent message
 is still filed into the one it flags as Sent, whether or not the allow-list
 mentions them. Naming either folder in a tool call is still refused; only these
 two built-in steps may reach it.
+
+## Saving attachments
+
+`yandex_mail_read_message` lists every attachment with a `part_id`.
+`yandex_mail_save_attachment` takes that `part_id`, with the message's `uid` and
+`folder`, streams the attachment from the server straight into a file, and
+answers with where the file is:
+
+```json
+{"attachment": {"uid": "101", "folder": "INBOX", "part_id": "2",
+  "filename": "Отчёт за сентябрь.pdf", "content_type": "application/pdf",
+  "size": 300032, "sha256": "…",
+  "path": "/home/you/.hermes/cache/documents/yandex-mail_3f9c1a2b4d5e_Отчёт за сентябрь.pdf"}}
+```
+
+The content never enters the model's context. It is off until you name it:
+
+```dotenv
+YANDEX_MAIL_ACTIONS=read,save_attachment
+```
+
+- **Where it goes.** Hermes' document cache, `~/.hermes/cache/documents` (or
+  that of the active profile) — the directory Hermes itself files incoming
+  documents in. Other tools can open the file there, and in a Docker, Modal or
+  SSH sandbox the path returned is the one the sandbox sees.
+- **Getting it to you.** On a messaging platform the agent sends the file by
+  writing `MEDIA:<path>` in its reply, which Hermes' platform prompts already
+  teach it; the tool result itself carries no such tag, so a file reaches you
+  only when the agent decides to send it. In the CLI the path is simply shown.
+- **How long it stays.** Files are kept for 24 hours. The Hermes gateway prunes
+  its document cache on that schedule, and since the CLI and TUI do not, each
+  save also deletes this plugin's own files older than that — never anyone
+  else's.
+- **How it is written.** The name comes from the sender, so it is reduced to a
+  single safe file name — no directories, no control or bidirectional-override
+  characters — and prefixed with `yandex-mail_` and a random token. The bytes go
+  to a temporary file readable only by you (`0600`), which is linked into place
+  once complete: a half-written file never appears, and an existing file is
+  never replaced. An attachment larger than `YANDEX_MAIL_ATTACHMENT_MAX_BYTES`
+  (100 MiB unless set) is refused, and anything already written is removed.
+- **Not marked as read.** Fetching an attachment leaves `\Seen` alone.
 
 ## Sending mail
 
@@ -476,6 +530,9 @@ The `e2e`-marked tests hit a real Yandex mailbox and are deselected by default.
 They upload one throwaway message with a unique marker via IMAP `APPEND`, then
 search, read, flag, move, and erase it, and the cleanup sweeps until the server
 agrees nothing is left — so a successful run leaves the mailbox as it found it.
+
+They also save an attachment of that message to a temporary Hermes home and
+compare it with what was uploaded, byte for byte.
 
 Since 0.3.0 they also **really send**, which is the only way to test sending at
 all. Every message goes to the test account itself and nowhere else, held there

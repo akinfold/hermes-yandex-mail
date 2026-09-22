@@ -13,11 +13,15 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import hashlib
 import json
+import os
+import stat
 import time
 import uuid
 from email.message import EmailMessage
 from email.utils import make_msgid
+from pathlib import Path
 
 import pytest
 
@@ -332,6 +336,27 @@ def test_a_cyrillic_attachment_name_is_decoded(samples):
     assert attachment["filename"] == "Отчёт за сентябрь.pdf"
     assert attachment["content_type"] == "application/pdf"
     assert abs(attachment["size"] - len(_ATTACHMENT)) < 4, attachment
+
+
+def test_an_attachment_is_saved_byte_for_byte(samples):
+    uid = samples["attachment"]
+    part_id = _read_pages(uid, 20000)[2]["attachments"][0]["part_id"]
+    payload = json.loads(
+        tool.handle_save_attachment({"uid": uid, "folder": "INBOX", "part_id": part_id})
+    )
+    assert "error" not in payload, payload
+    saved = payload["attachment"]
+    path = Path(saved["path"])
+    try:
+        # HERMES_HOME points at a temporary directory for the whole test run.
+        assert path.parent == Path(os.environ["HERMES_HOME"]) / "cache" / "documents"
+        assert path.name.endswith("_Отчёт за сентябрь.pdf")
+        assert path.read_bytes() == _ATTACHMENT
+        assert saved["size"] == len(_ATTACHMENT)
+        assert saved["sha256"] == hashlib.sha256(_ATTACHMENT).hexdigest()
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def test_a_long_body_pages_back_exactly(samples):

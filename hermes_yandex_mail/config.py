@@ -28,12 +28,18 @@ ENV_ACTIONS = _ENV_PREFIX + "ACTIONS"
 ENV_SMTP_HOST = _ENV_PREFIX + "SMTP_HOST"
 ENV_SMTP_PORT = _ENV_PREFIX + "SMTP_PORT"
 ENV_SEND_TO = _ENV_PREFIX + "SEND_TO"
+ENV_ATTACHMENT_MAX_BYTES = _ENV_PREFIX + "ATTACHMENT_MAX_BYTES"
+
+#: The size cap for a saved attachment when ``YANDEX_MAIL_ATTACHMENT_MAX_BYTES``
+#: is not set.
+DEFAULT_ATTACHMENT_MAX_BYTES = 100 * 1024 * 1024
 
 #: Every action the plugin can expose, in the order the tools are registered.
 ACTIONS: tuple[str, ...] = (
     "list_folders",
     "search_messages",
     "read_message",
+    "save_attachment",
     "mark_message",
     "move_message",
     "delete_message",
@@ -52,8 +58,16 @@ ACTIONS: tuple[str, ...] = (
 #: upgrade alone.
 SENDING_ACTIONS: frozenset[str] = frozenset({"send_message"})
 
-#: What "everything" means: every action except the sending ones.
-DEFAULT_ACTIONS: frozenset[str] = frozenset(ACTIONS) - SENDING_ACTIONS
+#: Every action reached only by naming it. Saving an attachment joins sending
+#: here for the same reason: the most common deployment leaves the allow-list
+#: unset, and an upgrade must not start writing the content of attachments to
+#: disk for an agent that was only ever given the text of mail. It too is
+#: named ``save_attachment`` (or ``yandex_mail_save_attachment``) and nothing
+#: shorter, since a short word may already sit in a configuration, ignored.
+OPT_IN_ACTIONS: frozenset[str] = SENDING_ACTIONS | {"save_attachment"}
+
+#: What "everything" means: every action except the opt-in ones.
+DEFAULT_ACTIONS: frozenset[str] = frozenset(ACTIONS) - OPT_IN_ACTIONS
 
 #: Shorthands accepted by ``YANDEX_MAIL_ACTIONS`` alongside single actions.
 ACTION_GROUPS: dict[str, frozenset[str]] = {
@@ -68,7 +82,9 @@ _TOOL_PREFIX = "yandex_mail_"
 __all__ = [
     "ACTIONS",
     "ACTION_GROUPS",
+    "DEFAULT_ATTACHMENT_MAX_BYTES",
     "ENV_ACTIONS",
+    "ENV_ATTACHMENT_MAX_BYTES",
     "ENV_FOLDERS",
     "ENV_HOST",
     "ENV_LOGIN",
@@ -83,6 +99,7 @@ __all__ = [
     "allowed_actions",
     "allowed_folders",
     "allowed_send_recipients",
+    "attachment_max_bytes",
     "build_client",
     "build_smtp_client",
     "credentials_present",
@@ -103,9 +120,10 @@ def allowed_actions() -> frozenset[str]:
     :data:`ACTION_GROUPS` (``read``, ``write``, ``delete``, ``all``), and full
     tool names (``yandex_mail_delete_message``), comma-separated and
     case-insensitive. Unset or blank means :data:`DEFAULT_ACTIONS` — every action
-    except ``send_message`` — so existing installs are unaffected and an upgrade
-    never switches sending on; ``all`` behaves the same way. ``send_message`` is
-    granted only by naming it. Any other value is an explicit allow-list: names that match
+    except the opt-in ones, ``send_message`` and ``save_attachment`` — so
+    existing installs are unaffected and an upgrade never switches either on;
+    ``all`` behaves the same way. The opt-in actions are granted only by naming
+    them. Any other value is an explicit allow-list: names that match
     nothing are dropped rather than raising, so a typo can only ever withhold a
     tool, never grant one (a value naming nothing valid therefore allows
     nothing). Tools are filtered at registration time and permissions are
@@ -171,6 +189,29 @@ def allowed_send_recipients() -> list[str] | None:
         return None
     entries = [item.strip() for item in raw.split(",")]
     return [entry for entry in entries if _is_fence_entry(entry)]
+
+
+def attachment_max_bytes() -> int:
+    """The most a saved attachment may be, from ``YANDEX_MAIL_ATTACHMENT_MAX_BYTES``.
+
+    Unset means :data:`DEFAULT_ATTACHMENT_MAX_BYTES`. A value that is set but is
+    not a positive whole number of bytes refuses every save rather than falling
+    back to the default: ``100MB`` or ``10 MiB`` typed as a tighter cap must not
+    quietly become a looser one.
+    """
+    raw = get_provider_env(ENV_ATTACHMENT_MAX_BYTES)
+    if not raw and not provider_env_is_set(ENV_ATTACHMENT_MAX_BYTES):
+        return DEFAULT_ATTACHMENT_MAX_BYTES
+    try:
+        limit = int(raw)
+    except ValueError:
+        limit = 0
+    if limit <= 0:
+        raise PermissionDenied(
+            f"{ENV_ATTACHMENT_MAX_BYTES} is set to {raw!r}, which is not a positive whole "
+            "number of bytes, so no attachment can be saved until it is corrected."
+        )
+    return limit
 
 
 def _is_fence_entry(entry: str) -> bool:

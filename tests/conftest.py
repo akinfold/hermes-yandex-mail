@@ -238,6 +238,12 @@ class FakeIMAP:
         return [call[1] for call in self.calls if call[0] == "uid"]
 
 
+@pytest.fixture(autouse=True)
+def _isolated_hermes_home(tmp_path, monkeypatch):
+    """Nothing a test saves may land in the real ~/.hermes."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+
+
 @pytest.fixture
 def fake_imap() -> FakeIMAP:
     return FakeIMAP()

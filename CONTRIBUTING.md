@@ -25,11 +25,12 @@ hermes_yandex_mail/
   mime.py       # BODYSTRUCTURE parsing: parts, filenames, sizes, no Hermes imports
   paging.py     # streaming transfer and charset decoding, pages, no Hermes imports
   html_text.py  # streaming HTML-to-text conversion, no Hermes imports
+  attachment.py # saves an attachment to a file safely, no Hermes imports
   imap.py       # the IMAP client for Yandex, no Hermes imports
   compose.py    # builds an outgoing message and refuses unsafe addressing
   smtp.py       # hand-driven SMTP submission, no Hermes imports
   config.py     # env -> client, folder allow-list, action allow-list
-  _compat.py    # real-vs-shim host env helper: a variable's value, and whether it is set
+  _compat.py    # host boundary: env values and presence, the document cache, sandbox paths
   tool.py       # tool schemas + handlers (JSON in, JSON string out)
   __init__.py   # register(ctx) — the plugin entry point
 tests/          # unit tests (no network, scripted FakeIMAP and FakeSMTP in conftest.py)
@@ -42,7 +43,7 @@ tests/install/  # installs the build into a real Hermes by every README route, m
 The plugin follows the Hermes plugin contract; a few of these are load-bearing:
 
 - **Layering.** Keep the domain modules (`imap.py`, `imap_utf7.py`, `message.py`,
-  `mime.py`, `paging.py`, `html_text.py`, `compose.py`, `smtp.py`)
+  `mime.py`, `paging.py`, `html_text.py`, `attachment.py`, `compose.py`, `smtp.py`)
   free of any `agent.*` imports so they stay unit-testable. The host-facing glue
   lives in `tool.py`, `config.py`, and `__init__.py`.
 - **Never raise across the boundary.** Tool handlers (`handle_*`) must always
