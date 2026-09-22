@@ -471,7 +471,11 @@ Or keep both out of the command line, in `~/.yandex-mail-login` and
 
 The **E2E (live)** workflow is manual (`workflow_dispatch`). It reads
 `YANDEX_MAIL_LOGIN` and `YANDEX_MAIL_APP_PASSWORD` from a GitHub Environment
-named `yandex-mail-e2e`.
+named `yandex-mail-e2e`. It runs the plugin inside a real Hermes, set up the way
+the Hermes installer sets it up: the latest Hermes release by default, and its
+`hermes` input switches to Hermes `main` or to no Hermes at all. With Hermes, the
+run fails outright if the plugin cannot import it, rather than testing the
+plugin's stand-ins instead.
 
 ## Checking the install paths
 
