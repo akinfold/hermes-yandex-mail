@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "hermes-yandex-mail"
 version = "0.4.0"
-description = "Yandex Mail plugin for Hermes Agent: search, read, flag, move and delete messages over IMAP, and send over SMTP when it is switched on."
+description = "Yandex Mail plugin for Hermes Agent: search, read, flag, move and delete messages over IMAP, and save attachments to files and send over SMTP when they are switched on."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
