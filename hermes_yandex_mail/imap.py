@@ -38,7 +38,7 @@ from .message import (
     header_date_iso,
     parse_message_bytes,
 )
-from .mime import MimePart, flatten_parts, response_fields
+from .mime import MessageNotFound, MimePart, flatten_parts, response_fields
 
 __all__ = [
     "DEFAULT_FOLDER",
@@ -856,6 +856,8 @@ class YandexIMAPClient:
             if not isinstance(structure, list):
                 raise ValueError("Server did not return BODYSTRUCTURE.")
             return flatten_parts(structure)
+        except MessageNotFound as exc:
+            raise MailError(f"Message {uid} not found in {folder}.") from exc
         except (ValueError, TypeError, IndexError) as exc:
             raise MailError(f"Cannot parse MIME structure: {exc}") from exc
 
@@ -871,6 +873,8 @@ class YandexIMAPClient:
             )
             try:
                 fields = response_fields(data, uid, literal_bytes=True)
+            except MessageNotFound as exc:
+                raise MailError(f"Message {uid} not found in {folder}.") from exc
             except (ValueError, TypeError, IndexError) as exc:
                 raise MailError(f"Cannot parse MIME part response: {exc}") from exc
             raw = fields.get(f"BODY[{part_id}]<{offset}>")

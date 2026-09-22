@@ -21,7 +21,10 @@ pip install -e '.[dev]'
 ```
 hermes_yandex_mail/
   imap_utf7.py  # modified UTF-7 for mailbox names (RFC 3501), no Hermes imports
-  message.py    # MIME parsing: headers, body selection, attachments, no Hermes imports
+  message.py    # header decoding, no Hermes imports
+  mime.py       # BODYSTRUCTURE parsing: parts, filenames, sizes, no Hermes imports
+  paging.py     # streaming transfer and charset decoding, pages, no Hermes imports
+  html_text.py  # streaming HTML-to-text conversion, no Hermes imports
   imap.py       # the IMAP client for Yandex, no Hermes imports
   compose.py    # builds an outgoing message and refuses unsafe addressing
   smtp.py       # hand-driven SMTP submission, no Hermes imports
@@ -39,7 +42,7 @@ tests/install/  # installs the build into a real Hermes by every README route, m
 The plugin follows the Hermes plugin contract; a few of these are load-bearing:
 
 - **Layering.** Keep the domain modules (`imap.py`, `imap_utf7.py`, `message.py`,
-  `compose.py`, `smtp.py`)
+  `mime.py`, `paging.py`, `html_text.py`, `compose.py`, `smtp.py`)
   free of any `agent.*` imports so they stay unit-testable. The host-facing glue
   lives in `tool.py`, `config.py`, and `__init__.py`.
 - **Never raise across the boundary.** Tool handlers (`handle_*`) must always

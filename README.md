@@ -73,7 +73,7 @@ Up to seven standalone tools, in the `yandex_mail` toolset:
 |---|---|
 | `yandex_mail_list_folders` | List folders with their role (inbox, sent, trash, junk, drafts, archive) and total/unread counts. |
 | `yandex_mail_search_messages` | Search a folder by sender, recipient, subject, full text, date range, unread or flagged state; returns subject, addresses, date, size, flags, and the `uid`. Pages with `offset`, and reports `total` so you know whether more exist. |
-| `yandex_mail_read_message` | Read a page of decoded text plus headers and attachment metadata, without downloading attachments. Peeks by default. |
+| `yandex_mail_read_message` | Read one message: headers, the text body in pages (HTML-only mail is converted to text), and the attachment list. Attachments are not downloaded. Peeks by default. |
 | `yandex_mail_mark_message` | Mark messages read/unread and flagged/unflagged. |
 | `yandex_mail_move_message` | Move messages to another folder, reporting which UID each message was verified to have on arrival. |
 | `yandex_mail_delete_message` | Delete messages — to Trash by default. A message already there is left untouched; permanent deletion is a separate, irreversible request. |
@@ -100,32 +100,30 @@ is off unless you switch it on — see [Sending mail](#sending-mail).
 
 ### Reading long messages
 
-Read the first text page with:
+`yandex_mail_read_message` returns the body a page at a time: 20 000 characters
+by default, up to 100 000 with `max_chars`. While the result says `eof: false`,
+the next call passes its `next_offset` as `offset`:
 
 ```json
-{"uid": "101", "folder": "INBOX", "offset": 0, "max_chars": 20000}
+{"uid": "101", "folder": "INBOX", "offset": 20000}
 ```
 
-The result's `message` object contains `body`, `offset`, `next_offset`, `eof`,
-and `truncated`. Pass `next_offset` as the next call's `offset` until `eof=true`
-and `next_offset=null`. Offsets count decoded Unicode characters after HTML
-conversion and CRLF normalization. `max_chars` defaults to 20 000 and is capped
-at 100 000 per page. The plain-text body is preferred over an HTML alternative.
+Offsets count characters of the text the tool returns — after an HTML body has
+been converted — so the pages join back together exactly. On the last page `eof`
+is `true` and `next_offset` is `null`.
 
-Each attachment has a `part_id`, filename, MIME type, and `encoded_size` in wire
-bytes. The `size` field is `null` because exact decoded size cannot always be
-derived from metadata alone. Attachment content is not downloaded.
+Only the text parts of a message are downloaded, in blocks of 64 KiB, and never
+its attachments: a message carrying a 25 MB attachment reads as quickly as one
+without. The plain-text body is preferred over an HTML one, and the text of a
+forwarded message is part of the body. Attachments are listed with a `part_id`,
+name, MIME type, and a `size` estimated from their encoded size on the server,
+which can be off by a few bytes.
 
-The implementation uses [IMAP BODYSTRUCTURE and partial BODY.PEEK requests](https://www.rfc-editor.org/rfc/rfc3501#section-6.4.5).
-Only selected MIME parts are downloaded, in blocks of at most 64 KiB. The paged
-tools have no 10 MiB whole-message limit. The low-level `fetch_message()` API
-keeps that limit for callers that request a complete raw message.
-
-Pagination is stateless: later pages replay the selected part's prefix to
-preserve decoder state. This keeps memory bounded and avoids caching private
-mail, but deep offsets use extra bandwidth and time. Metadata over 1 MiB, MIME
-nesting over 40 parser levels, and incomplete HTML tokens or pending charset
-decoder state over 64 KiB are rejected explicitly.
+Paging keeps no copy of your mail: every page decodes the text from its
+beginning again, so a deep page of a very long message costs more time and
+traffic than the first. A structure description over 1 MiB, nesting deeper than
+40 levels, or a character-set decoder holding more than 64 KiB is refused with an
+error rather than buffered.
 
 ## Configuration
 

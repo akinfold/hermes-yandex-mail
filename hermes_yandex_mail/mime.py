@@ -5,8 +5,16 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from email.message import Message
+from urllib.parse import unquote
 
 from .message import decode_header_value
+
+#: An RFC 2231 extended value: charset, language, then percent-encoded text.
+_EXTENDED_VALUE = re.compile(r"([A-Za-z0-9!#$&+^_`{}~-]+)'[A-Za-z0-9-]*'(.*)", re.DOTALL)
+
+
+class MessageNotFound(ValueError):
+    """The server answered the FETCH with nothing for the requested UID."""
 
 
 class StructureParser:
@@ -97,7 +105,7 @@ def response_fields(data: list, uid: str, literal_bytes: bool = False) -> dict:
                 found.update(fields)
         parser.space()
     if not found:
-        raise ValueError(f"Message {uid} was not returned.")
+        raise MessageNotFound(f"Message {uid} was not returned.")
     return found
 
 
@@ -125,13 +133,26 @@ class MimePart:
     filename: str = ""
     attachment: bool = False
 
+    @property
+    def size(self) -> int:
+        """The decoded size in bytes, estimated from the encoded one.
+
+        Exact for 7bit, 8bit and binary. Base64 is taken to be wrapped at the
+        76 characters MIME allows, which is how mail is written in practice, so
+        each 78 bytes on the wire (with CRLF) carry 57 bytes of content; the
+        estimate is then off by at most a few bytes. Quoted-printable is given
+        its encoded size, which is an upper bound.
+        """
+        if self.encoding == "base64":
+            return self.encoded_size * 57 // 78
+        return self.encoded_size
+
     def attachment_info(self):
         return {
             "part_id": self.part_id,
             "filename": self.filename or "(unnamed)",
             "content_type": self.content_type,
-            "size": None,
-            "encoded_size": self.encoded_size,
+            "size": self.size,
         }
 
 
@@ -144,7 +165,24 @@ def _filename(params, disposition) -> str:
         message["Content-Disposition"] = str(disposition[0])
         for key, value in _parameters(disposition[1]).items():
             message.set_param(key, value, header="Content-Disposition")
-    return decode_header_value(message.get_filename())
+    return _decoded_filename(message.get_filename() or "")
+
+
+def _decoded_filename(value: str) -> str:
+    """Decode a filename that may still carry RFC 2231 or RFC 2047 encoding.
+
+    Yandex joins RFC 2231 continuations itself but hands the value back still
+    percent-encoded, under the plain key: ``("filename" "utf-8''%D0%9E...")``.
+    For mail in Russian that is nearly every attachment.
+    """
+    extended = _EXTENDED_VALUE.fullmatch(value)
+    if extended:
+        charset, text = extended.groups()
+        try:
+            return unquote(text, encoding=charset, errors="strict")
+        except (LookupError, UnicodeDecodeError):
+            pass
+    return decode_header_value(value)
 
 
 def _leaf(node: list, part_id: str, inherited_attachment: bool) -> MimePart:
@@ -175,9 +213,14 @@ def _leaf(node: list, part_id: str, inherited_attachment: bool) -> MimePart:
 def flatten_parts(
     node: list, prefix: str = "", inherited_attachment: bool = False
 ) -> list[MimePart]:
-    """Number leaf sections; attached messages remain opaque downloadable parts."""
+    """Number leaf sections, including the parts of an attached message.
+
+    A ``message/rfc822`` part is listed as an attachment in its own right, and
+    its body, which BODYSTRUCTURE carries at index 8, is walked as well: the
+    text of a forwarded message belongs to what the reader sees.
+    """
     if not node or not isinstance(node[0], list):
-        return [_leaf(node, prefix or "1", inherited_attachment)]
+        return _single(node, prefix or "1", inherited_attachment)
     count = next((i for i, item in enumerate(node) if not isinstance(item, list)), len(node))
     disposition = node[count + 2] if len(node) > count + 2 else None
     attached = _attached(disposition)
@@ -186,3 +229,22 @@ def flatten_parts(
         number = f"{prefix}.{i}" if prefix else str(i)
         parts.extend(flatten_parts(child, number, inherited_attachment or attached))
     return parts
+
+
+def _single(node: list, part_id: str, inherited_attachment: bool) -> list[MimePart]:
+    part = _leaf(node, part_id, inherited_attachment)
+    body = node[8] if part.content_type == "message/rfc822" and len(node) > 8 else None
+    if not isinstance(body, list) or not body:
+        return [part]
+    return [part, *_encapsulated(body, part_id, inherited_attachment)]
+
+
+def _encapsulated(body: list, part_id: str, inherited_attachment: bool) -> list[MimePart]:
+    """Number the body of an attached message (RFC 3501, section 6.4.5).
+
+    A multipart body's children are ``N.1``, ``N.2``...; a body that is a
+    single part is ``N.1`` itself.
+    """
+    if body and isinstance(body[0], list):
+        return flatten_parts(body, part_id, inherited_attachment)
+    return flatten_parts(body, f"{part_id}.1", inherited_attachment)

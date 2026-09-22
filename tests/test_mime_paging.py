@@ -1,12 +1,17 @@
-"""Protocol grammar and decoding boundaries used by message and attachment pages."""
+"""Protocol grammar and decoding boundaries used by message pages."""
 
 import base64
 import quopri
 
 import pytest
 
-from hermes_yandex_mail.mime import StructureParser, flatten_parts, response_fields
-from hermes_yandex_mail.paging import decoded_chunks, take_page, text_chunks
+from hermes_yandex_mail.mime import (
+    MessageNotFound,
+    StructureParser,
+    flatten_parts,
+    response_fields,
+)
+from hermes_yandex_mail.paging import body_text, decoded_chunks, take_page, text_chunks
 
 
 @pytest.mark.parametrize("encoding", ["base64", "quoted-printable", "7bit", "8bit", "binary"])
@@ -35,7 +40,8 @@ def test_html_page_offsets_apply_after_tags_entities_and_hidden_text():
     raw = b"<head><title>hidden</title></head><p>A &amp; B</p><script>hidden</script><br>C"
 
     def chunks():
-        return text_chunks([raw[i : i + 1] for i in range(len(raw))], "utf-8", html=True)
+        text = text_chunks([raw[i : i + 1] for i in range(len(raw))], "utf-8")
+        return body_text([text], html=True)
 
     expected = "A & B\n\nC"
     assert "".join(chunks()) == expected
@@ -44,25 +50,26 @@ def test_html_page_offsets_apply_after_tags_entities_and_hidden_text():
 
 
 @pytest.mark.parametrize(
-    "payload,encoding", [(b"YW", "base64"), (b"@@@=", "base64"), (b"x", "rot13")]
+    "payload,encoding,expected",
+    [
+        (b"SGVsbG8gd29ybGQ", "base64", b"Hello world"),  # final padding missing
+        (b"SGVsbG8=\r\nIHdvcmxk\r\n", "base64", b"Hello world"),  # two blocks, one after another
+        (b"SGVs@bG8*gd29y!bGQ=", "base64", b"Hello world"),  # stray characters
+        (b"YW", "base64", b"a"),
+        (b"@@@=", "base64", b""),
+        (b"QUJDR", "base64", b"ABC"),  # a lone trailing character carries no byte
+        (b"plain", "x-unknown", b"plain"),
+        (b"plain", "rot13", b"plain"),
+    ],
 )
-def test_invalid_encodings_fail_explicitly(payload, encoding):
-    with pytest.raises(ValueError):
-        list(decoded_chunks([payload], encoding))
-
-
-def test_base64_rejects_data_after_padding():
-    with pytest.raises(ValueError):
-        list(decoded_chunks([b"eA==", b"eA=="], "base64"))
+def test_sloppy_encodings_decode_as_leniently_as_the_email_package(payload, encoding, expected):
+    for width in (1, 3, len(payload)):
+        chunks = [payload[i : i + width] for i in range(0, len(payload), width)]
+        assert b"".join(decoded_chunks(chunks, encoding)) == expected
 
 
 def test_quoted_printable_flushes_a_trailing_literal():
     assert b"".join(decoded_chunks([b"x=Z"], "quoted-printable")) == b"x=Z"
-
-
-def test_html_parser_limits_incomplete_tokens():
-    with pytest.raises(ValueError, match="HTML token"):
-        list(text_chunks([b"<!--" + b"x" * 65536], "utf-8", html=True))
 
 
 @pytest.mark.parametrize(
@@ -117,8 +124,7 @@ def test_nested_parts_keep_numbers_and_rfc2231_filename():
     parts = flatten_parts(outer)
     assert [p.part_id for p in parts] == ["1.1", "1.2", "2"]
     assert parts[2].filename == "Тест.pdf"
-    assert parts[2].attachment_info()["encoded_size"] == 42
-    assert parts[2].attachment_info()["size"] is None
+    assert parts[2].attachment_info()["size"] == 30
 
 
 def test_attached_message_and_multipart_children_are_not_body_text():
@@ -140,7 +146,7 @@ def test_malformed_structure_is_rejected(raw):
 def test_structure_limits_and_missing_uid():
     with pytest.raises(ValueError, match="metadata limit"):
         StructureParser(b"x" * (1024 * 1024 + 1))
-    with pytest.raises(ValueError, match="not returned"):
+    with pytest.raises(MessageNotFound, match="not returned"):
         response_fields([None, b"1 (UID 9 FLAGS ())"], "8")
     with pytest.raises(ValueError, match="size"):
         flatten_parts(["TEXT", "PLAIN", None, None, None, "7BIT", "-1", "1"])
@@ -149,3 +155,21 @@ def test_structure_limits_and_missing_uid():
 def test_unterminated_charset_sequences_cannot_grow_without_bound():
     with pytest.raises(ValueError, match="decoder"):
         list(text_chunks([b"+" + b"A" * 65535, b"A" * 65536], "utf-7"))
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("utf-8''%D0%A2%D0%B5%D1%81%D1%82.pdf", "Тест.pdf"),
+        ("windows-1251''%D2%E5%F1%F2.pdf", "Тест.pdf"),
+        ("utf-8'ru'%D0%9E%D1%82.pdf", "От.pdf"),
+        ("nosuchcharset''a%20b.pdf", "nosuchcharset''a%20b.pdf"),
+        ("utf-8''%FF.pdf", "utf-8''%FF.pdf"),
+        ("it's 100%.pdf", "it's 100%.pdf"),
+        ("=?utf-8?B?0KLQtdGB0YI=?=.pdf", "Тест.pdf"),
+    ],
+)
+def test_filenames_under_the_plain_key_are_decoded_when_they_are_encoded(value, expected):
+    node = ["APPLICATION", "PDF", None, None, None, "BASE64", "4", None]
+    node.append(["ATTACHMENT", ["FILENAME", value]])
+    assert flatten_parts(node)[0].filename == expected

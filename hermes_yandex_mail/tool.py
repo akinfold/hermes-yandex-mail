@@ -8,6 +8,7 @@ a JSON string, and NEVER raises — every failure path becomes
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from email.message import EmailMessage
 from email.utils import make_msgid
 from typing import Any
@@ -28,7 +29,7 @@ from .config import (
 )
 from .imap import Folder, MailError, MessageSummary, ReplyAnchor, SearchQuery, YandexIMAPClient
 from .mime import MimePart
-from .paging import decoded_chunks, take_page, text_chunks
+from .paging import body_text, decoded_chunks, take_page, text_chunks
 from .smtp import DeliveryResult, SendError
 
 TOOLSET = "yandex_mail"
@@ -123,9 +124,11 @@ SEARCH_SCHEMA: dict[str, Any] = {
 READ_SCHEMA: dict[str, Any] = {
     "name": "yandex_mail_read_message",
     "description": (
-        "Read a page of message text plus headers and attachment metadata. Text offsets "
-        "count decoded characters; pass next_offset to continue. Attachments are not "
-        "downloaded. Does not mark the message as read unless you ask it to."
+        "Read one message: headers, a page of the text body (an HTML-only message is "
+        "converted to text), and the list of attachments (name, type, approximate size). "
+        "A long body comes in pages: while eof is false, call again with offset set to "
+        "next_offset. Attachments are listed, not downloaded. Does not mark the message as "
+        "read unless you ask it to."
     ),
     "parameters": {
         "type": "object",
@@ -138,7 +141,13 @@ READ_SCHEMA: dict[str, Any] = {
                 ),
             },
             "folder": {"type": "string", "description": _REQUIRED_FOLDER_HINT},
-            "offset": {"type": "integer", "description": "Decoded character offset (default 0)."},
+            "offset": {
+                "type": "integer",
+                "description": (
+                    "Where the page starts, in characters of the body text: the next_offset "
+                    "of the previous page (default 0)."
+                ),
+            },
             "mark_read": {
                 "type": "boolean",
                 "description": (
@@ -149,7 +158,7 @@ READ_SCHEMA: dict[str, Any] = {
             },
             "max_chars": {
                 "type": "integer",
-                "description": "Body character limit (default 20000, maximum 100000).",
+                "description": "Page size in characters (default 20000, max 100000).",
             },
         },
         "required": ["uid", "folder"],
@@ -464,11 +473,12 @@ def handle_search(args: dict[str, Any], **_kwargs: Any) -> str:
 def _read_payload(
     client: YandexIMAPClient, folder: str, uid: str, args: dict[str, Any]
 ) -> dict[str, Any]:
-    offset = _offset(args)
+    offset = _int_arg(args, "offset", 0)
     max_chars = _int_arg(args, "max_chars", _DEFAULT_MAX_CHARS, _MAX_CHARS)
     parts = client.message_parts(folder, uid)
     selected, is_html = _readable_parts(parts)
-    body, eof = take_page(_body_chunks(client, folder, uid, selected), offset, max_chars, "")
+    texts = (_part_text(client, folder, uid, part) for part in selected)
+    body, eof = take_page(body_text(texts, html=is_html), offset, max_chars, "")
     summary = client.summary(folder, uid)
     payload: dict[str, Any] = (
         _summary_to_dict(summary) if summary else {"uid": uid, "folder": folder}
@@ -502,20 +512,10 @@ def _mark_read(client: YandexIMAPClient, folder: str, uid: str, payload: dict[st
     payload["unread"] = False
 
 
-def _offset(args: dict[str, Any]) -> int:
-    value = args.get("offset", 0)
-    if type(value) is not int or value < 0:
-        raise ValueError("'offset' must be a non-negative integer.")
-    return value
-
-
-def _body_chunks(client: YandexIMAPClient, folder: str, uid: str, parts: list[MimePart]):
-    for index, part in enumerate(parts):
-        if index:
-            yield "\n"
-        raw = client.iter_part(folder, uid, part.part_id)
-        decoded = decoded_chunks(raw, part.encoding)
-        yield from text_chunks(decoded, part.charset, html=part.content_type == "text/html")
+def _part_text(client: YandexIMAPClient, folder: str, uid: str, part: MimePart) -> Iterator[str]:
+    """The text of one part, fetched only once something reads it."""
+    raw = client.iter_part(folder, uid, part.part_id)
+    return text_chunks(decoded_chunks(raw, part.encoding), part.charset)
 
 
 def handle_read(args: dict[str, Any], **_kwargs: Any) -> str:
