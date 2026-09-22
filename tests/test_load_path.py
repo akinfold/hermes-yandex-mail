@@ -87,10 +87,12 @@ def test_manifest_matches_the_code():
     assert manifest["kind"] == "standalone"
     assert str(manifest["version"]) == module.__version__
     assert set(manifest["provides_tools"]) == MANIFEST_TOOLS
-    assert [entry["key"] for entry in manifest["requires_env"]] == [
+    # Hermes prompts for an entry by its `name` and silently drops one without.
+    assert [entry["name"] for entry in manifest["requires_env"]] == [
         "YANDEX_MAIL_LOGIN",
         "YANDEX_MAIL_APP_PASSWORD",
     ]
+    assert [entry.get("secret", False) for entry in manifest["requires_env"]] == [False, True]
 
 
 def test_the_three_version_files_agree():

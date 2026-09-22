@@ -38,11 +38,12 @@ Tested against Hermes **0.19.x–0.21.x**, Python **3.11–3.13**.
 ## Quick start
 
 ```bash
-# 1. Install into Hermes (alternatively: pip install hermes-yandex-mail)
+# 1. Install into Hermes (or from PyPI — see Installing, Option B). It asks for
+#    your login and an app password, which comes from
+#    https://id.yandex.ru/security/app-passwords (scope: "Почта" / Mail)
 hermes plugins install akinfold/hermes-yandex-mail/hermes_yandex_mail --enable
 
-# 2. Add your credentials — the app password comes from
-#    https://id.yandex.ru/security/app-passwords (scope: "Почта" / Mail)
+# 2. Skipped the questions, or installed another way? Add the credentials yourself:
 printf 'YANDEX_MAIL_LOGIN=%s\nYANDEX_MAIL_APP_PASSWORD=%s\n' \
   'you@yandex.ru' 'your-app-password' >> ~/.hermes/.env
 ```
@@ -393,21 +394,43 @@ repository name, which nothing answers to. `hermes plugins list` then still show
 enabled**, which is the symptom to look for. If you installed that way, remove
 `~/.hermes/plugins/hermes-yandex-mail` and install again with the directory named.
 
-### Option B — pip
+### Option B — from PyPI
+
+Install the package into the virtualenv Hermes runs from, then enable it. With
+the standard Hermes install that virtualenv is `~/.hermes/hermes-agent/venv`
+(`/usr/local/lib/hermes-agent/venv` if the installer ran as root on Linux), and
+Hermes keeps its own `uv` in `~/.hermes/bin`:
 
 ```bash
-pip install hermes-yandex-mail
+~/.hermes/bin/uv pip install --python ~/.hermes/hermes-agent/venv/bin/python hermes-yandex-mail
+hermes plugins enable yandex_mail
 ```
 
-Hermes discovers it through the `hermes_agent.plugins` entry point; add
-`yandex_mail` to `plugins.enabled`.
+A bare `pip install hermes-yandex-mail` does not get there: the installer builds
+that virtualenv with `uv` and without `pip`, so the `pip` on your `PATH` belongs
+to some other Python, and Hermes never sees the plugin. If you installed Hermes
+another way, install the package into whichever environment the `hermes` command
+runs from. Hermes finds it through the `hermes_agent.plugins` entry point. Nothing
+asks for credentials on this path — add them to `~/.hermes/.env` as in the
+[Quick start](#quick-start).
 
 ### Option C — drop-in directory
 
 Download `hermes-yandex-mail-plugin-<version>.zip` from the release — not the
-wheel, the `.tar.gz`, or GitHub's "Source code" archives — and unzip it into
-`~/.hermes/plugins/` so you end up with
-`~/.hermes/plugins/yandex_mail/plugin.yaml`, then enable it the same way.
+wheel, the `.tar.gz`, or GitHub's "Source code" archives — then unzip it into
+`~/.hermes/plugins/` and enable it:
+
+```bash
+unzip hermes-yandex-mail-plugin-<version>.zip -d ~/.hermes/plugins/
+hermes plugins enable yandex_mail
+```
+
+You should end up with `~/.hermes/plugins/yandex_mail/plugin.yaml`. As with
+Option B, add the credentials to `~/.hermes/.env` yourself.
+
+All three options are checked before every release by installing the build into
+a real Hermes — the latest release and `main` — exactly as written here; see
+[Development](#development).
 
 ## Development
 
@@ -449,6 +472,22 @@ Or keep both out of the command line, in `~/.yandex-mail-login` and
 The **E2E (live)** workflow is manual (`workflow_dispatch`). It reads
 `YANDEX_MAIL_LOGIN` and `YANDEX_MAIL_APP_PASSWORD` from a GitHub Environment
 named `yandex-mail-e2e`.
+
+## Checking the install paths
+
+The `install`-marked tests in `tests/install/` install the built plugin into a
+real Hermes, set up the way the official installer sets it up, by each option in
+[Installing the plugin into Hermes](#installing-the-plugin-into-hermes) — running
+the README's own commands — and then ask Hermes what it loaded: the plugin must be
+listed as enabled, load without error, and give the agent its tools. They also
+check that installing from the repository root still looks the way this README
+describes. A fast unit test keeps the commands in the tests and in this README
+identical.
+
+The **Install check** workflow runs them against the latest Hermes release and
+against Hermes `main` on every pull request, and on every release tag before
+anything is published: the GitHub Release and the PyPI upload both wait for it.
+To run them locally, see the docstring of `tests/install/test_install.py`.
 
 ## Related Hermes plugins
 
