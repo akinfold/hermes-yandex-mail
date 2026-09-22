@@ -11,7 +11,6 @@ the test account, so mail is sent but never to a third party.
 
 from __future__ import annotations
 
-import base64
 import contextlib
 import json
 import time
@@ -218,7 +217,7 @@ def test_flags_round_trip(client, planted):
     assert restored is not None and restored.seen and not restored.flagged
 
 
-def test_text_and_attachment_pages(planted):
+def test_text_pages(planted):
     args = {"uid": planted["uid"], "folder": "INBOX"}
     full = json.loads(tool.handle_read(args))["message"]
     text, offset = [], 0
@@ -229,20 +228,6 @@ def test_text_and_attachment_pages(planted):
             break
         offset = page["next_offset"]
     assert "".join(text) == full["body"]
-    attachment = full["attachments"][0]
-    data, offset = [], 0
-    for _ in range(20):
-        page = json.loads(
-            tool.handle_read_attachment(
-                {**args, "part_id": attachment["part_id"], "offset": offset, "limit": 4}
-            )
-        )
-        assert "error" not in page, page
-        data.append(base64.b64decode(page["data_base64"]))
-        if page["eof"]:
-            break
-        offset = page["next_offset"]
-    assert b"".join(data) == b"attachment payload"
 
 
 def test_move_to_trash_then_purge(client, planted):

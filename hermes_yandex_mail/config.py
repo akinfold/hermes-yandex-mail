@@ -34,7 +34,6 @@ ACTIONS: tuple[str, ...] = (
     "list_folders",
     "search_messages",
     "read_message",
-    "read_attachment",
     "mark_message",
     "move_message",
     "delete_message",
@@ -59,7 +58,7 @@ DEFAULT_ACTIONS: frozenset[str] = frozenset(ACTIONS) - SENDING_ACTIONS
 #: Shorthands accepted by ``YANDEX_MAIL_ACTIONS`` alongside single actions.
 ACTION_GROUPS: dict[str, frozenset[str]] = {
     "all": DEFAULT_ACTIONS,
-    "read": frozenset({"list_folders", "search_messages", "read_message", "read_attachment"}),
+    "read": frozenset({"list_folders", "search_messages", "read_message"}),
     "write": frozenset({"mark_message", "move_message"}),
     "delete": frozenset({"delete_message"}),
 }

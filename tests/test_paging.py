@@ -6,7 +6,7 @@ import re
 
 import pytest
 
-from hermes_yandex_mail import config, tool
+from hermes_yandex_mail import tool
 from hermes_yandex_mail.imap import MailError, YandexIMAPClient
 
 from .conftest import FakeIMAP
@@ -91,79 +91,10 @@ def test_text_continuation_has_no_missing_or_repeated_characters(mailbox):
     assert "".join(pages) == expected.replace("\r\n", "\n")
 
 
-def test_attachment_pages_reconstruct_original_bytes(mailbox):
-    assert hasattr(tool, "handle_read_attachment"), "Attachment tool is missing"
-    original = bytes(range(256)) * 500
-    mailbox.parts["2"] = base64.encodebytes(original)
-    chunks, offset = [], 0
-    for _ in range(100):
-        result = json.loads(
-            tool.handle_read_attachment(
-                {
-                    "uid": "8",
-                    "folder": "INBOX",
-                    "part_id": "2",
-                    "offset": offset,
-                    "limit": 4096,
-                }
-            )
-        )
-        assert "error" not in result, result
-        chunks.append(base64.b64decode(result["data_base64"]))
-        if result["eof"]:
-            break
-        offset = result["next_offset"]
-    assert b"".join(chunks) == original
-
-
-def test_attachment_requires_its_own_action(mailbox, monkeypatch):
-    assert hasattr(tool, "handle_read_attachment"), "Attachment tool is missing"
-    monkeypatch.setattr(config, "get_provider_env", lambda key: "read_message")
-    guarded = tool.with_action_guard("read_attachment", tool.handle_read_attachment)
-    result = json.loads(guarded({"uid": "8", "folder": "INBOX", "part_id": "2"}))
-    assert "not allowed" in result["error"]
-    assert not mailbox.calls
-
-
 @pytest.mark.parametrize("offset", [-1, "bad", True])
 def test_invalid_offsets_are_errors(mailbox, offset):
     result = json.loads(tool.handle_read({"uid": "8", "folder": "INBOX", "offset": offset}))
     assert "error" in result
-
-
-def test_attachment_continues_beyond_ten_megabytes(mailbox):
-    mailbox.parts["2"] = base64.encodebytes(b"x" * 10485760 + b"last bytes")
-    result = json.loads(
-        tool.handle_read_attachment(
-            {
-                "uid": "8",
-                "folder": "INBOX",
-                "part_id": "2",
-                "offset": 10485760,
-                "limit": 100,
-            }
-        )
-    )
-    assert base64.b64decode(result["data_base64"]) == b"last bytes"
-    assert result["eof"] and result["next_offset"] is None
-
-
-def test_attachment_page_limit_is_capped(mailbox):
-    mailbox.parts["2"] = base64.encodebytes(b"x" * 300000)
-    result = json.loads(
-        tool.handle_read_attachment({"uid": "8", "folder": "INBOX", "part_id": "2", "limit": 10**9})
-    )
-    assert result["bytes_returned"] == 262144
-    assert result["next_offset"] == 262144 and not result["eof"]
-
-
-@pytest.mark.parametrize("part_id", ["1", "2\r\nX NOOP", "2.MIME", "9", ""])
-def test_only_listed_attachments_can_be_read(mailbox, part_id):
-    result = json.loads(
-        tool.handle_read_attachment({"uid": "8", "folder": "INBOX", "part_id": part_id})
-    )
-    assert "not found" in result["error"]
-    assert not any("BODY.PEEK[" in str(c) for c in mailbox.calls)
 
 
 def test_missing_mime_metadata_is_an_error_not_a_full_message_fallback(mailbox):
@@ -185,20 +116,6 @@ def test_html_and_multiple_text_parts_are_paged_after_conversion(mailbox):
     assert page["body"] == "lo\nwo"
     assert page["body_from_html"] is True
     assert page["next_offset"] == 8
-
-
-def test_attachment_honours_folder_allow_list(monkeypatch):
-    fake = MimeIMAP()
-    monkeypatch.setattr(
-        tool,
-        "build_client",
-        lambda: YandexIMAPClient(
-            "fixture", "fixture", allowed_folders=["INBOX"], connection_factory=lambda *_: fake
-        ),
-    )
-    result = json.loads(tool.handle_read_attachment({"uid": "8", "part_id": "2", "folder": "Sent"}))
-    assert "not in the allowed list" in result["error"]
-    assert not any(call[0] in {"select", "uid"} for call in fake.calls)
 
 
 def test_quoted_body_data_and_quoted_empty_eof_are_valid():

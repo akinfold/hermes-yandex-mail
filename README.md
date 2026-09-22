@@ -74,7 +74,6 @@ Up to seven standalone tools, in the `yandex_mail` toolset:
 | `yandex_mail_list_folders` | List folders with their role (inbox, sent, trash, junk, drafts, archive) and total/unread counts. |
 | `yandex_mail_search_messages` | Search a folder by sender, recipient, subject, full text, date range, unread or flagged state; returns subject, addresses, date, size, flags, and the `uid`. Pages with `offset`, and reports `total` so you know whether more exist. |
 | `yandex_mail_read_message` | Read a page of decoded text plus headers and attachment metadata, without downloading attachments. Peeks by default. |
-| `yandex_mail_read_attachment` | Read one attachment in pages of decoded bytes, returned as base64. No files are saved automatically. |
 | `yandex_mail_mark_message` | Mark messages read/unread and flagged/unflagged. |
 | `yandex_mail_move_message` | Move messages to another folder, reporting which UID each message was verified to have on arrival. |
 | `yandex_mail_delete_message` | Delete messages — to Trash by default. A message already there is left untouched; permanent deletion is a separate, irreversible request. |
@@ -99,7 +98,7 @@ case-sensitive and would simply answer *"No such folder"*.
 Sending goes over **SMTP** (`smtp.yandex.ru:465`) with the same app password, and
 is off unless you switch it on — see [Sending mail](#sending-mail).
 
-### Reading long messages and large attachments
+### Reading long messages
 
 Read the first text page with:
 
@@ -115,17 +114,7 @@ at 100 000 per page. The plain-text body is preferred over an HTML alternative.
 
 Each attachment has a `part_id`, filename, MIME type, and `encoded_size` in wire
 bytes. The `size` field is `null` because exact decoded size cannot always be
-derived from metadata alone. Read an attachment explicitly using:
-
-```json
-{"uid": "101", "folder": "INBOX", "part_id": "2", "offset": 0, "limit": 49152}
-```
-
-`yandex_mail_read_attachment` returns `data_base64`, `bytes_returned`, `offset`,
-`next_offset`, and `eof`. Decode each page separately from base64, then
-concatenate those byte buffers. Offsets and `limit` count decoded file bytes;
-the default page is 48 KiB and the maximum is 256 KiB. Reading does not write to
-disk.
+derived from metadata alone. Attachment content is not downloaded.
 
 The implementation uses [IMAP BODYSTRUCTURE and partial BODY.PEEK requests](https://www.rfc-editor.org/rfc/rfc3501#section-6.4.5).
 Only selected MIME parts are downloaded, in blocks of at most 64 KiB. The paged
@@ -213,9 +202,7 @@ the environment is restricted. Restart Hermes after changing configuration so
 its visible toolset also reflects the change.
 
 Reading with `mark_read=true` also requires `mark_message` permission. The `read`
-group alone always leaves the message's read/unread state unchanged. To expose
-text reading without attachment content, use
-`YANDEX_MAIL_ACTIONS=list_folders,search_messages,read_message`.
+group alone always leaves the message's read/unread state unchanged.
 
 Pair it with `YANDEX_MAIL_FOLDERS` to fence off the rest of the mailbox: with
 `YANDEX_MAIL_FOLDERS=INBOX`, every other folder is invisible to the agent and
@@ -399,9 +386,10 @@ is off, or the app password lacks the Mail scope.
   verified to have on arrival. Use it rather than searching — Yandex cannot
   search by `Message-ID`. A message that could not be verified is simply absent
   from the map, never guessed.
-- **Reading is paged.** Text and attachment content are fetched separately.
-  Continue with `next_offset` to read beyond the page limit; attachment size
-  does not force a whole-message download. See the pagination examples above.
+- **Reading is paged.** Only the text parts are fetched, never the attachments.
+  Continue with `next_offset` to read beyond the page limit; a large attachment
+  does not force a whole-message download. See
+  [Reading long messages](#reading-long-messages).
 - **The TLS certificate and hostname are verified**, and every connection
   carries a 30-second timeout. A private or self-signed CA is supplied the
   standard way, via `SSL_CERT_FILE` / `SSL_CERT_DIR`; there is no setting for

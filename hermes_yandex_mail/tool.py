@@ -7,7 +7,6 @@ a JSON string, and NEVER raises — every failure path becomes
 
 from __future__ import annotations
 
-import base64
 import json
 from email.message import EmailMessage
 from email.utils import make_msgid
@@ -154,29 +153,6 @@ READ_SCHEMA: dict[str, Any] = {
             },
         },
         "required": ["uid", "folder"],
-    },
-}
-
-ATTACHMENT_SCHEMA: dict[str, Any] = {
-    "name": "yandex_mail_read_attachment",
-    "description": (
-        "Read a page of one attachment as base64. Use part_id from read_message's "
-        "attachment list and next_offset to continue. Offsets and limits count decoded "
-        "file bytes, not base64 characters. Does not save files or mark mail as read."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "uid": {"type": "string", "description": _UID_HINT},
-            "folder": {"type": "string", "description": _REQUIRED_FOLDER_HINT},
-            "part_id": {"type": "string", "description": "Attachment part_id from read_message."},
-            "offset": {"type": "integer", "description": "Decoded byte offset (default 0)."},
-            "limit": {
-                "type": "integer",
-                "description": "Page size in bytes (default 49152, maximum 262144).",
-            },
-        },
-        "required": ["uid", "folder", "part_id"],
     },
 }
 
@@ -540,40 +516,6 @@ def _body_chunks(client: YandexIMAPClient, folder: str, uid: str, parts: list[Mi
         raw = client.iter_part(folder, uid, part.part_id)
         decoded = decoded_chunks(raw, part.encoding)
         yield from text_chunks(decoded, part.charset, html=part.content_type == "text/html")
-
-
-def handle_read_attachment(args: dict[str, Any], **_kwargs: Any) -> str:
-    try:
-        uid, offset = _uids(args)[0], _offset(args)
-        folder_arg = _required_folder(args)
-        limit = _int_arg(args, "limit", 49152, 262144)
-        with build_client() as client:
-            folder = client.resolve_folder(client.check_folder(folder_arg))
-            parts = client.message_parts(folder, uid)
-            part = next(
-                (part for part in parts if part.part_id == args.get("part_id") and part.attachment),
-                None,
-            )
-            if part is None:
-                raise ValueError("Attachment part_id was not found in this message.")
-            raw = client.iter_part(folder, uid, part.part_id)
-            data, eof = take_page(decoded_chunks(raw, part.encoding), offset, limit, b"")
-        return _dump(
-            {
-                "uid": uid,
-                "folder": folder,
-                **part.attachment_info(),
-                "offset": offset,
-                "next_offset": None if eof else offset + len(data),
-                "eof": eof,
-                "bytes_returned": len(data),
-                "data_base64": base64.b64encode(data).decode("ascii"),
-            }
-        )
-    except (MissingCredentials, MailError, ValueError) as exc:
-        return _error(str(exc))
-    except Exception as exc:
-        return _error(f"Unexpected error reading attachment: {exc}")
 
 
 def handle_read(args: dict[str, Any], **_kwargs: Any) -> str:
