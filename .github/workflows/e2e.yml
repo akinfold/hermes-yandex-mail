@@ -3,15 +3,21 @@
 # secrets there. The suite touches a throwaway message it uploads itself and
 # deletes afterwards, and it sends real mail over SMTP — fenced by
 # YANDEX_MAIL_SEND_TO to the test account, so nobody else is emailed.
+#
+# The plugin runs inside a real Hermes, set up the way its installer sets it up
+# (see .github/actions/setup-hermes): the latest release by default, or main,
+# which is what the installer checks out. `none` runs it on its own, on the
+# stand-ins in _compat.py.
 name: E2E (live)
 
 on:
   workflow_dispatch:
     inputs:
-      install_hermes:
-        description: "Install hermes-agent alongside the plugin"
-        type: boolean
-        default: false
+      hermes:
+        description: "Hermes to run the plugin in"
+        type: choice
+        options: [release, main, none]
+        default: release
 
 permissions:
   contents: read
@@ -26,13 +32,29 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: python -m pip install -e '.[dev]'
-      - name: Install hermes-agent (optional)
-        if: ${{ inputs.install_hermes }}
-        continue-on-error: true
-        run: python -m pip install hermes-agent
+      - name: Set up Hermes the way its installer does
+        id: hermes
+        if: inputs.hermes != 'none'
+        uses: ./.github/actions/setup-hermes
+        with:
+          channel: ${{ inputs.hermes }}
+      - name: Install the plugin into Hermes' virtualenv
+        if: inputs.hermes != 'none'
+        env:
+          HERMES_PYTHON: ${{ steps.hermes.outputs.python }}
+        run: |
+          set -euo pipefail
+          uv pip install --quiet --python "$HERMES_PYTHON" -e . pytest
+          # Hermes' own code, or a failed run: never a quiet fallback to the stand-ins.
+          "$HERMES_PYTHON" -c "from hermes_yandex_mail._compat import HERMES_AVAILABLE; assert HERMES_AVAILABLE, 'the plugin cannot import Hermes'"
+          echo "E2E_PYTHON=$HERMES_PYTHON" >> "$GITHUB_ENV"
+      - name: Install the plugin on its own
+        if: inputs.hermes == 'none'
+        run: |
+          python -m pip install -e '.[dev]'
+          echo "E2E_PYTHON=$(command -v python)" >> "$GITHUB_ENV"
       - name: Run live E2E tests
         env:
           YANDEX_MAIL_LOGIN: ${{ secrets.YANDEX_MAIL_LOGIN }}
           YANDEX_MAIL_APP_PASSWORD: ${{ secrets.YANDEX_MAIL_APP_PASSWORD }}
-        run: python -m pytest -m e2e -v
+        run: '"$E2E_PYTHON" -m pytest -m e2e -v'

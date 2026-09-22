@@ -51,8 +51,11 @@ include = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["e2e: live tests that hit a real Yandex mailbox over IMAP (deselected by default)."]
-addopts = "-m 'not e2e'"
+markers = [
+    "e2e: live tests that hit a real Yandex mailbox over IMAP (deselected by default).",
+    "install: install the built plugin into a real Hermes (deselected by default).",
+]
+addopts = "-m 'not e2e and not install'"
 
 [tool.ruff]
 line-length = 100
