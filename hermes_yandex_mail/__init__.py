@@ -17,7 +17,7 @@ from typing import Any
 from . import tool
 from .config import ENV_LOGIN, ENV_PASSWORD, allowed_actions, credentials_present
 
-__version__ = "0.3.3"
+__version__ = "0.3.4"
 
 __all__ = ["__version__", "register"]
 
