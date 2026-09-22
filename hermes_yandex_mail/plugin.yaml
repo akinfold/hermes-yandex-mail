@@ -1,6 +1,6 @@
 name: yandex_mail
-version: 0.2.1
-description: "Search and page through Yandex Mail text and attachments; flag, move, and delete messages over IMAP. Requires YANDEX_MAIL_LOGIN and YANDEX_MAIL_APP_PASSWORD; YANDEX_MAIL_ACTIONS restricts which tools are exposed."
+version: 0.3.4
+description: "Search, read, flag, move, and delete Yandex Mail messages over IMAP, and send over SMTP. Requires YANDEX_MAIL_LOGIN and YANDEX_MAIL_APP_PASSWORD; YANDEX_MAIL_ACTIONS restricts which tools are exposed, and sending is off unless it names send_message explicitly."
 author: akinfold
 kind: standalone
 provides_tools:
@@ -11,10 +11,15 @@ provides_tools:
   - yandex_mail_mark_message
   - yandex_mail_move_message
   - yandex_mail_delete_message
+  - yandex_mail_send_message
+# `hermes plugins install` asks for each of these that ~/.hermes/.env lacks.
+# Hermes reads `name`, `description`, `url` and `secret`, and drops an entry
+# without a `name`.
 requires_env:
-  - key: YANDEX_MAIL_LOGIN
-    prompt: "Yandex login / email (e.g. you@yandex.ru)"
+  - name: YANDEX_MAIL_LOGIN
+    description: "Yandex login / email (e.g. you@yandex.ru)"
     url: "https://id.yandex.ru/security/app-passwords"
-  - key: YANDEX_MAIL_APP_PASSWORD
-    prompt: "Yandex app password with the Mail (IMAP) scope"
+  - name: YANDEX_MAIL_APP_PASSWORD
+    description: "Yandex app password with the Mail (IMAP) scope"
     url: "https://id.yandex.ru/security/app-passwords"
+    secret: true

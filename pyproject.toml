@@ -4,14 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hermes-yandex-mail"
-version = "0.2.1"
-description = "Yandex Mail plugin for Hermes Agent: search, read, flag, move, and delete messages over IMAP."
+version = "0.3.4"
+description = "Yandex Mail plugin for Hermes Agent: search, read, flag, move and delete messages over IMAP, and send over SMTP when it is switched on."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11,<3.14"
 authors = [{ name = "Roman Akinfeev" }]
-keywords = ["hermes", "hermes-agent", "plugin", "yandex", "mail", "email", "imap"]
+keywords = ["hermes", "hermes-agent", "plugin", "yandex", "mail", "email", "imap", "smtp"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -23,7 +23,7 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=7.4", "pytest-cov>=4.1", "ruff>=0.6", "radon>=6.0", "pyyaml>=6.0"]
+dev = ["pytest>=9.1.1", "pytest-cov>=4.1", "ruff>=0.16.8", "radon>=6.0.1", "pyyaml>=6.0.3"]
 
 [project.urls]
 Homepage = "https://github.com/akinfold/hermes-yandex-mail"
@@ -51,8 +51,11 @@ include = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["e2e: live tests that hit a real Yandex mailbox over IMAP (deselected by default)."]
-addopts = "-m 'not e2e'"
+markers = [
+    "e2e: live tests that hit a real Yandex mailbox over IMAP (deselected by default).",
+    "install: install the built plugin into a real Hermes (deselected by default).",
+]
+addopts = "-m 'not e2e and not install'"
 
 [tool.ruff]
 line-length = 100

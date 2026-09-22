@@ -24,6 +24,7 @@ __all__ = [
     "Attachment",
     "MessageBody",
     "addresses",
+    "bare_addresses",
     "decode_header_value",
     "extract_body",
     "header_date_iso",
@@ -68,18 +69,47 @@ def decode_header_value(raw: str | None) -> str:
     return "".join(out).strip()
 
 
+def _address_pairs(raw: str | None) -> list[tuple[str, str]]:
+    """``(display name, address)`` pairs — split FIRST, decoded afterwards.
+
+    The order is the whole point. :func:`parse_message_bytes` uses
+    ``policy.default``, which has already decoded the header, so decoding the
+    whole thing again before splitting — as an earlier version did — lets an
+    encoded word *nested* inside a display name become a second address. A
+    ``From`` of ``=?utf-8?B?…?= <billing@real-bank.example>`` whose display name
+    decodes to ``x@evil.org,`` then yields two addresses where the sender wrote
+    one, and the attacker's is the first of them: exactly the value
+    ``from_address`` reports and a model is told to copy into a reply.
+
+    Splitting before decoding means a display name can only ever stay a display
+    name, however many layers of encoding are wrapped around it.
+    """
+    text = str(raw or "")
+    if not text:
+        return []
+    return [(decode_header_value(name), addr) for name, addr in getaddresses([text])]
+
+
 def addresses(raw: str | None) -> list[str]:
     """Split an address header into ``Name <addr>`` / ``addr`` strings."""
-    decoded = decode_header_value(raw)
-    if not decoded:
-        return []
     out: list[str] = []
-    for name, addr in getaddresses([decoded]):
+    for name, addr in _address_pairs(raw):
         if name and addr:
             out.append(f"{name} <{addr}>")
         elif addr or name:
             out.append(addr or name)
     return out
+
+
+def bare_addresses(raw: str | None) -> list[str]:
+    """Just the addr-specs from an address header, without display names.
+
+    :func:`addresses` renders ``Name <addr>`` for a human reader, which is the
+    wrong thing to hand back to a model that may copy it into an argument: a
+    display name containing an ``@`` parses as a second address. This is the
+    form to copy.
+    """
+    return [addr for _name, addr in _address_pairs(raw) if addr]
 
 
 def header_date_iso(raw: str | None) -> str:

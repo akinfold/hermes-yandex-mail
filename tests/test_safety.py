@@ -81,6 +81,31 @@ def test_registered_handlers_recheck_permission_before_building_client(monkeypat
     assert not built
 
 
+def test_a_revoked_send_permission_still_promises_nothing_was_sent(monkeypatch):
+    """The send path's refusals all end the same way, this one included.
+
+    The sentence is what tells an agent the call is safe to try again. A
+    permission revoked between registration and the call is the one refusal
+    that does not come from ``handle_send`` itself, so it has to be given the
+    ending deliberately.
+    """
+    actions = {"value": "all,send_message"}
+    handlers = _registered_handlers(monkeypatch, actions)
+    actions["value"] = "read"
+    response = json.loads(handlers["yandex_mail_send_message"]({"to": "bob@example.org"}))
+    assert "not allowed" in response["error"]
+    assert response["error"].endswith("Nothing was sent.")
+
+
+def test_a_revoked_read_permission_does_not_talk_about_sending(monkeypatch):
+    """...and no other tool gains that sentence, which would be nonsense."""
+    actions = {"value": "all"}
+    handlers = _registered_handlers(monkeypatch, actions)
+    actions["value"] = "disabled"
+    response = json.loads(handlers["yandex_mail_read_message"]({"uid": "8", "folder": "INBOX"}))
+    assert "Nothing was sent" not in response["error"]
+
+
 def test_delete_in_trash_reports_no_change():
     fake = FakeIMAP()
     with YandexIMAPClient("fixture", "fixture", connection_factory=lambda *_: fake) as client:

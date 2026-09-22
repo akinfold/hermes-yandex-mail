@@ -2,7 +2,8 @@
 
 Thanks for your interest in improving **hermes-yandex-mail** — a
 [Hermes Agent](https://hermes-agent.nousresearch.com) plugin that reads and
-organises a Yandex mailbox over IMAP. Contributions of all sizes are welcome:
+organises a Yandex mailbox over IMAP and, when it is switched on, sends mail
+over SMTP. Contributions of all sizes are welcome:
 bug reports, docs, tests, and features.
 
 All repository content — code, comments, docs, commit messages, issues, and
@@ -22,19 +23,23 @@ hermes_yandex_mail/
   imap_utf7.py  # modified UTF-7 for mailbox names (RFC 3501), no Hermes imports
   message.py    # MIME parsing: headers, body selection, attachments, no Hermes imports
   imap.py       # the IMAP client for Yandex, no Hermes imports
+  compose.py    # builds an outgoing message and refuses unsafe addressing
+  smtp.py       # hand-driven SMTP submission, no Hermes imports
   config.py     # env -> client, folder allow-list, action allow-list
-  _compat.py    # real-vs-shim host env helper
+  _compat.py    # real-vs-shim host env helper: a variable's value, and whether it is set
   tool.py       # tool schemas + handlers (JSON in, JSON string out)
   __init__.py   # register(ctx) — the plugin entry point
-tests/          # unit tests (no network, a scripted FakeIMAP in conftest.py)
+tests/          # unit tests (no network, scripted FakeIMAP and FakeSMTP in conftest.py)
 tests/e2e/      # live tests against a real mailbox, marked `e2e`
+tests/install/  # installs the build into a real Hermes by every README route, marked `install`
 ```
 
 ## Ground rules
 
 The plugin follows the Hermes plugin contract; a few of these are load-bearing:
 
-- **Layering.** Keep the domain modules (`imap.py`, `imap_utf7.py`, `message.py`)
+- **Layering.** Keep the domain modules (`imap.py`, `imap_utf7.py`, `message.py`,
+  `compose.py`, `smtp.py`)
   free of any `agent.*` imports so they stay unit-testable. The host-facing glue
   lives in `tool.py`, `config.py`, and `__init__.py`.
 - **Never raise across the boundary.** Tool handlers (`handle_*`) must always
@@ -44,15 +49,33 @@ The plugin follows the Hermes plugin contract; a few of these are load-bearing:
   expunging is always UID-scoped (`UID EXPUNGE`, so a bare `EXPUNGE` cannot take
   someone else's `\Deleted` messages with it), and deletion means "move to
   Trash" unless the caller explicitly asked for permanence.
+- **Never send as anybody else.** `From` and the envelope sender are
+  `YANDEX_MAIL_LOGIN`; no tool argument may influence either. Recipients come
+  only from what the caller passed — never from the message being replied to,
+  whose headers are written by whoever sent it.
+- **Never let a send be retried by accident, and never hide a refusal.**
+  Anything that fails before the payload reaches the socket says so plainly.
+  After it, the reply to end-of-data decides: `250` is a delivery; an explicit
+  `4xx` or `5xx` is the server declining the message, so nothing reached anyone
+  and it is an error with no copy filed in Sent and no `\Answered` flag set;
+  and no verdict at all is the single unknown case, which must be reported as
+  sent-but-unconfirmed so nobody retries it. `smtp.py` drives the transaction
+  by hand for exactly this reason; `smtplib.send_message` cannot tell the three
+  apart.
 - **Relative imports only** in `__init__.py` — the plugin loads as
   `hermes_plugins.yandex_mail`.
 - **Address comparison** goes through `imap.normalize_email` — Yandex treats
   `@ya.ru` and `@yandex.ru` as the same mailbox, and a second private copy of
   that rule will eventually disagree with the first.
 - **Secrets** are resolved via `_compat.get_provider_env`; never log their values.
+  That value arrives stripped, so it cannot tell "unset" from "set to
+  whitespace". When absence and emptiness must mean different things — as they
+  do for `YANDEX_MAIL_SEND_TO`, where absence means "no fence" — ask
+  `_compat.provider_env_is_set` as well.
 - **Non-ASCII on the wire.** `imaplib` encodes `str` arguments as ASCII, so any
-  argument that can carry Cyrillic (folder names, search terms) must be passed as
-  UTF-8 `bytes`.
+  argument that can carry Cyrillic must be passed as `bytes` — folder names as
+  modified UTF-7 through `_quote_mailbox` (RFC 3501), search terms as UTF-8
+  through `_quoted` together with `CHARSET UTF-8`.
 
 ## Checks
 
@@ -68,8 +91,19 @@ the bar. `radon cc -a hermes_yandex_mail` shows the average.
 Unit tests must not open a socket: `tests/conftest.py` provides `FakeIMAP`, a
 scriptable stand-in for an `imaplib.IMAP4` connection that records every command,
 so tests can assert on the wire traffic (including the order of `COPY`, `STORE`,
-and `EXPUNGE`). Live tests go under `tests/e2e/`, are marked `@pytest.mark.e2e`,
+and `EXPUNGE`), and `FakeSMTP`, the same for `smtplib.SMTP_SSL`, which models how
+far the bytes got so the nothing-sent / possibly-delivered distinction can be
+tested. Live tests go under `tests/e2e/`, are marked `@pytest.mark.e2e`,
 and skip when credentials are absent.
+
+The install check lives in `tests/install/` and is marked `install`. It installs
+the built wheel, the drop-in archive, and the Git tree into a real Hermes, set up
+the way the Hermes installer sets it up, using the commands the README gives, and
+asks Hermes what it loaded. Change an install instruction in the README and you
+change the test: `test_readme_gives_the_commands_under_test`, which runs with the
+unit tests, fails until the two agree. The **Install check** workflow runs it on
+every pull request against the latest Hermes release and against Hermes `main`;
+the docstring of `tests/install/test_install.py` says how to run it locally.
 
 ## Running the live tests locally
 
@@ -82,8 +116,10 @@ pytest -m e2e -v
 ```
 
 The suite uploads one throwaway message with a unique marker via IMAP `APPEND`,
-exercises the tools against it, and erases it in a `finally` — nothing is sent,
-so no one is emailed. Use a dedicated test mailbox anyway, never a personal one.
+exercises the tools against it, and erases it in a `finally`. Since 0.3.0 it also
+exercises the send path for real over SMTP: it sets `YANDEX_MAIL_SEND_TO` to the
+test account itself, so mail is genuinely sent and delivered, but only ever to that
+mailbox — no third party is emailed. Use a dedicated test mailbox anyway, never a personal one.
 `YANDEX_MAIL_APP_PASSWORD` must be an app password with the **Mail** scope, and
 IMAP must be enabled for the mailbox. Live tests are manual and never required
 for a PR.
@@ -119,7 +155,9 @@ Then tag:
 git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 
-The publish workflow builds artifacts, creates a GitHub Release, and (if the repo
-variable `PUBLISH_TO_PYPI=true` and a PyPI Trusted Publisher is configured)
-publishes to PyPI. The `pypi` environment's approval gate is a deliberate human
+The publish workflow builds artifacts, runs the install check on exactly those
+artifacts, and only then creates a GitHub Release and (if the repo variable
+`PUBLISH_TO_PYPI=true` and a PyPI Trusted Publisher is configured) publishes to
+PyPI. If the install check fails, nothing is released: fix it, and move the tag
+or bump the version. The `pypi` environment's approval gate is a deliberate human
 checkpoint — a PyPI version cannot be republished.

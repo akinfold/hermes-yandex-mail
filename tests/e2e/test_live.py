@@ -2,15 +2,17 @@
 
 Marked ``e2e`` and deselected by default; run them with ``pytest -m e2e``.
 
-They are self-contained: nothing is *sent*, so no third party is ever emailed.
 The suite uploads (IMAP ``APPEND``) one throwaway message with a unique marker
 in its subject, exercises the whole tool surface against it, and erases it in a
-``finally`` — so a failed assertion still leaves the mailbox as it was found.
+``finally`` — so a failed assertion still leaves the mailbox as it was found. The
+send path is exercised for real over SMTP, with ``YANDEX_MAIL_SEND_TO`` fenced to
+the test account, so mail is sent but never to a third party.
 """
 
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import time
 import uuid
@@ -20,7 +22,12 @@ from email.utils import make_msgid
 import pytest
 
 from hermes_yandex_mail import config, tool
-from hermes_yandex_mail.imap import MailError, SearchQuery, YandexIMAPClient, normalize_email
+from hermes_yandex_mail.imap import (
+    MailError,
+    SearchQuery,
+    YandexIMAPClient,
+    normalize_email,
+)
 
 pytestmark = pytest.mark.e2e
 
@@ -108,6 +115,34 @@ def planted(client, account):
         _purge_everywhere(marker)
 
 
+#: A sweep that searched once could miss what it is meant to erase: Yandex
+#: indexes a just-arrived message asynchronously, so the window between "the
+#: test is done with it" and "the server can find it" is real, and anything
+#: missed is live mail left in someone's account. Sweep until two consecutive
+#: passes come back empty.
+_PURGE_TIMEOUT = 90.0
+_PURGE_POLL = 2.0
+
+
+def _find_everywhere(client: YandexIMAPClient, marker: str) -> list[tuple[str, str]]:
+    """Every copy of one throwaway message, by both search paths.
+
+    TEXT and SUBJECT are indexed independently on this server, and either can
+    be the one that has caught up — so ask both rather than trusting whichever
+    happened to work last time.
+    """
+    hits: list[tuple[str, str]] = []
+    for folder in client.list_folders():
+        for query in (SearchQuery(text=marker), SearchQuery(subject=marker)):
+            try:
+                found = client.search(folder.name, query, limit=50)
+            except MailError:  # pragma: no cover - diagnostics only
+                # One unreadable folder must not stop the others being cleaned.
+                continue
+            hits += [(folder.name, message.uid) for message in found]
+    return sorted(set(hits))
+
+
 def _purge_everywhere(marker: str) -> None:
     """Erase every trace of one throwaway message, wherever it ended up.
 
@@ -117,15 +152,23 @@ def _purge_everywhere(marker: str) -> None:
     that state would both miss the message and raise a second error on top
     of the real failure.
     """
+    deadline = time.monotonic() + _PURGE_TIMEOUT
+    quiet = 0
+    while quiet < 2:
+        with config.build_client() as cleanup:
+            hits = _find_everywhere(cleanup, marker)
+            for folder, uid in hits:
+                with contextlib.suppress(MailError):
+                    cleanup.delete(folder, [uid], permanent=True)
+        quiet = 0 if hits else quiet + 1
+        if time.monotonic() > deadline:
+            break
+        if quiet < 2:
+            time.sleep(_PURGE_POLL)
     with config.build_client() as cleanup:
-        for folder in cleanup.list_folders():
-            try:
-                found = cleanup.search(folder.name, SearchQuery(text=marker), limit=50)
-                if found:
-                    cleanup.delete(folder.name, [m.uid for m in found], permanent=True)
-            except MailError:  # pragma: no cover - diagnostics only
-                # One unreadable folder must not stop the others being cleaned.
-                continue
+        left = _find_everywhere(cleanup, marker)
+    if left:  # pragma: no cover - only when the server never settles
+        raise RuntimeError(f"live cleanup left {marker} behind in {left}")
 
 
 def test_folders_report_roles_and_counts(client):
@@ -239,3 +282,123 @@ def test_the_tool_handlers_work_against_the_live_account(client, planted):
         tool.handle_mark({"uid": planted["uid"], "folder": "INBOX", "flagged": True})
     )
     assert marked.get("marked") is True, marked
+
+
+# -- sending ----------------------------------------------------------------
+#
+# These really do send. Two independent guards keep every message inside the
+# test account: the fixture below sets YANDEX_MAIL_SEND_TO to the account
+# itself, so the plugin's own fence refuses anything else before a socket
+# opens, and _only_to_self asserts it again in the test process. A bug in one
+# of them cannot mail a stranger on its own.
+
+
+@pytest.fixture
+def sending(monkeypatch, account):
+    """Switch sending on, fenced to this account, for one test."""
+    monkeypatch.setenv(config.ENV_ACTIONS, "all,send_message")
+    monkeypatch.setenv(config.ENV_SEND_TO, account)
+    return account
+
+
+def _only_to_self(account: str, **args) -> dict:
+    to = args.get("to", "")
+    assert to, "a live send must always name its recipient"
+    for recipient in to.split(","):
+        assert normalize_email(recipient) == normalize_email(account), (
+            f"refusing to send to {recipient!r}: the live suite only ever mails itself"
+        )
+    return json.loads(tool.handle_send(args))
+
+
+def _wait_for_delivery(client: YandexIMAPClient, folder: str, marker: str):
+    """Yandex delivers to itself in a second or two; give it a few more."""
+    deadline = time.monotonic() + 60.0
+    while True:
+        found = client.search(folder, SearchQuery(text=marker), limit=10)
+        if found or time.monotonic() > deadline:
+            return found
+        time.sleep(2.0)
+
+
+def test_sending_to_self_arrives_and_is_filed_in_sent(client, account, sending):
+    marker = uuid.uuid4().hex[:12]
+    try:
+        result = _only_to_self(
+            account,
+            to=account,
+            subject=f"[{MARKER_PREFIX}] {marker} — отправка",
+            body=f"Тело письма. {marker}\n",
+        )
+        assert "error" not in result, result
+        assert result["sent"] is True
+        assert result["delivery"] == "confirmed", result
+        assert result["recipients"] == [account], result
+        assert result["from"] == account
+        assert result["saved_to_sent"] is True, result
+        assert result["notes"] == [], result
+
+        sent_folder = result["sent_folder"]
+        with config.build_client() as reader:
+            filed = _await_search(reader, sent_folder, marker, expect_found=True)
+            assert filed, f"no copy of the message in {sent_folder}"
+            delivered = _wait_for_delivery(reader, "INBOX", marker)
+            assert delivered, "the message never arrived in INBOX"
+            payload = json.loads(tool.handle_read({"uid": delivered[0].uid, "folder": "INBOX"}))
+        assert marker in payload["message"]["body"]
+        assert "Тело письма" in payload["message"]["body"], payload["message"]["body"][:200]
+    finally:
+        _purge_everywhere(marker)
+
+
+def test_a_reply_threads_onto_the_message_it_answers(client, account, planted, sending):
+    marker = uuid.uuid4().hex[:12]
+    original = client.summary("INBOX", planted["uid"])
+    assert original is not None and original.message_id
+    try:
+        result = _only_to_self(
+            account,
+            to=account,
+            body=f"Ответ. {marker}\n",
+            reply_to_uid=planted["uid"],
+            reply_to_folder="INBOX",
+            reply_to_message_id=original.message_id,
+        )
+        assert "error" not in result, result
+        assert result["in_reply_to"] == original.message_id, result
+        assert result["subject"].startswith("Re: "), result
+        assert result["recipient_sources"] == {account: "self"}, result
+        assert result["marked_answered"] is True, result
+
+        with config.build_client() as reader:
+            answered = reader.summary("INBOX", planted["uid"])
+            assert answered is not None and answered.answered, answered.flags
+            delivered = _wait_for_delivery(reader, "INBOX", marker)
+            assert delivered, "the reply never arrived"
+            raw, _flags = reader.fetch_message("INBOX", delivered[0].uid)
+        assert original.message_id.encode() in raw, "the reply is not threaded onto the original"
+    finally:
+        _purge_everywhere(marker)
+
+
+def test_the_fence_refuses_a_stranger_before_anything_is_sent(client, account, sending):
+    """The one live check that must NOT send: an address outside the fence."""
+    result = json.loads(
+        tool.handle_send(
+            {
+                "to": "nobody@example.invalid",
+                "subject": "must not be sent",
+                "body": "must not be sent",
+            }
+        )
+    )
+    assert "error" in result, result
+    assert config.ENV_SEND_TO in result["error"]
+
+
+def test_sending_is_refused_when_the_action_is_not_enabled(client, account, monkeypatch):
+    monkeypatch.setenv(config.ENV_ACTIONS, "all")
+    result = json.loads(
+        tool.handle_send({"to": account, "subject": "must not be sent", "body": "no"})
+    )
+    assert "error" in result and "not allowed" in result["error"], result

@@ -1,8 +1,11 @@
 """Yandex Mail plugin for Hermes Agent.
 
-Registers standalone tools that talk to Yandex Mail over IMAP: list folders,
-search, read, flag, move, and delete messages. Which of them appear is governed
-by ``YANDEX_MAIL_ACTIONS`` (see :func:`config.allowed_actions`). Uses RELATIVE
+Registers standalone tools that talk to Yandex Mail over IMAP — list folders,
+search, read, flag, move, delete — and, when it is switched on explicitly, one
+that sends over SMTP. Which of them appear is governed by
+``YANDEX_MAIL_ACTIONS`` (see :func:`config.allowed_actions`); sending is the
+one action an unset value does not grant, because an upgrade must never hand a
+running agent the right to write as the account owner. Uses RELATIVE
 imports so it loads both as a dropped-in directory plugin
 (``hermes_plugins.yandex_mail``) and as a pip package.
 """
@@ -14,7 +17,7 @@ from typing import Any
 from . import tool
 from .config import ENV_LOGIN, ENV_PASSWORD, allowed_actions, credentials_present
 
-__version__ = "0.2.1"
+__version__ = "0.3.4"
 
 __all__ = ["__version__", "register"]
 
@@ -71,6 +74,13 @@ _TOOLS: tuple[tuple[str, dict, Any, str, str], ...] = (
         tool.handle_delete,
         "Delete Yandex Mail messages (to Trash by default).",
         "🗑️",
+    ),
+    (
+        "send_message",
+        tool.SEND_SCHEMA,
+        tool.handle_send,
+        "Send a message from your Yandex Mail account, optionally as a threaded reply.",
+        "✉️",
     ),
 )
 

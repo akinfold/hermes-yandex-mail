@@ -31,7 +31,13 @@ from datetime import date, datetime
 from types import TracebackType
 
 from . import imap_utf7
-from .message import addresses, decode_header_value, header_date_iso, parse_message_bytes
+from .message import (
+    addresses,
+    bare_addresses,
+    decode_header_value,
+    header_date_iso,
+    parse_message_bytes,
+)
 from .mime import MimePart, flatten_parts, response_fields
 
 __all__ = [
@@ -42,6 +48,7 @@ __all__ = [
     "MailError",
     "MessageSummary",
     "MoveResult",
+    "ReplyAnchor",
     "SearchQuery",
     "SearchResult",
     "YandexIMAPClient",
@@ -142,6 +149,9 @@ class MessageSummary:
     folder: str
     subject: str = ""
     from_: list[str] = field(default_factory=list)
+    #: The sender's bare addr-spec — the form to copy into a reply's 'to',
+    #: where a display name would parse as an extra recipient.
+    from_address: str = ""
     to: list[str] = field(default_factory=list)
     cc: list[str] = field(default_factory=list)
     date: str = ""
@@ -160,6 +170,28 @@ class MessageSummary:
     @property
     def answered(self) -> bool:
         return "\\Answered" in self.flags
+
+
+@dataclass(frozen=True)
+class ReplyAnchor:
+    """The message a reply threads onto, read back from the server at send time.
+
+    Read back rather than carried over from an earlier turn on purpose: a UID
+    is only stable while the message stays put, and a reply must be threaded
+    onto the message the caller actually named, not onto whatever now occupies
+    that number. ``reply_to`` is carried so the caller can be *told* that a
+    message asks for replies elsewhere — never so that the plugin can act on
+    it.
+    """
+
+    uid: str
+    folder: str
+    message_id: str = ""
+    references: str = ""
+    subject: str = ""
+    from_: tuple[str, ...] = ()
+    to: tuple[str, ...] = ()
+    reply_to: tuple[str, ...] = ()
 
 
 @dataclass
@@ -328,6 +360,7 @@ def _summary_from_fetch(folder: str, info: bytes, headers: bytes) -> MessageSumm
         folder=folder,
         subject=decode_header_value(parsed.get("Subject")),
         from_=addresses(parsed.get("From")),
+        from_address=next(iter(bare_addresses(parsed.get("From"))), ""),
         to=addresses(parsed.get("To")),
         cc=addresses(parsed.get("Cc")),
         date=header_date_iso(parsed.get("Date")),
@@ -434,6 +467,7 @@ _SUMMARY_FIELDS = (
     "(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID)])"
 )
 _MESSAGE_ID_FIELDS = "(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])"
+_REPLY_FIELDS = "(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID REFERENCES SUBJECT FROM REPLY-TO TO)])"
 
 
 class YandexIMAPClient:
@@ -780,15 +814,15 @@ class YandexIMAPClient:
         resolved from the full, unfiltered, cached server folder list —
         deliberately not the allow-list-``list_folders()``.
 
-        Two reasons: performance — reusing ``_cached_folder_list()`` costs no
-        extra LIST when a folder has already been resolved earlier in the
-        same call, where ``list_folders()`` always issues a fresh one — and
-        correctness for ``_delete_to_trash``, which needs to find Trash even
-        when ``YANDEX_MAIL_FOLDERS`` excludes it: Trash is this tool's own
-        safety net for "delete", not a folder the agent chose, so a
-        deployment fencing off everything but INBOX (the README's
-        recommended safest setup) must not lose it and fall back to
-        pointing at an irreversible expunge instead.
+        Reusing ``_cached_folder_list()`` costs no extra LIST once a folder has
+        been resolved earlier in the same call, where ``list_folders()`` always
+        issues a fresh one.
+
+        This resolver falls back to well-known folder NAMES when the server
+        sends no special-use flag, so it must not be used for anything that
+        bypasses the allow-list. Soft delete and the Sent copy use
+        :meth:`find_flagged_folder` instead, which trusts the flag alone; only
+        the live e2e suite still calls this one.
         """
         for folder in self._cached_folder_list():
             if folder.special_use == role:
@@ -907,6 +941,42 @@ class YandexIMAPClient:
         self._select(folder, readonly=True)
         found = self._fetch_summaries(folder, [uid])
         return found[0] if found else None
+
+    def reply_anchor(self, folder: str, uid: str) -> ReplyAnchor | None:
+        """Headers of the message a reply is threading onto, or ``None`` if gone.
+
+        ``BODY.PEEK`` throughout: composing a reply must not mark the original
+        read as a side effect.
+        """
+        self._select(folder, readonly=True)
+        data = self._uid("FETCH", "FETCH", uid, _REPLY_FIELDS)
+        for info, headers in _iter_fetch_items(data):
+            if not _UID_RE.search(info):
+                continue
+            parsed = parse_message_bytes(headers)
+            return ReplyAnchor(
+                uid=uid,
+                folder=folder,
+                message_id=(parsed.get("Message-ID") or "").strip(),
+                references=(parsed.get("References") or "").strip(),
+                subject=decode_header_value(parsed.get("Subject")),
+                from_=tuple(addresses(parsed.get("From"))),
+                to=tuple(addresses(parsed.get("To"))),
+                reply_to=tuple(addresses(parsed.get("Reply-To"))),
+            )
+        return None
+
+    def find_sent_for_archive(self) -> str | None:
+        """Sent's exact server name by flag, bypassing the allow-list.
+
+        Filing a copy of what was sent is this plugin's own record-keeping, not
+        a folder the agent chose — the same reasoning as
+        :meth:`_resolve_trash_for_delete`. A deployment that fences
+        ``YANDEX_MAIL_FOLDERS`` down to INBOX should still get a record of
+        every message it sent. Flag-only, so an ordinary user folder named
+        ``Sent`` cannot capture the role.
+        """
+        return self.find_flagged_folder("sent")
 
     # -- writing ------------------------------------------------------------
 
@@ -1241,8 +1311,9 @@ class YandexIMAPClient:
     ) -> str | None:
         """Upload a message into a folder; returns its new UID when the server says.
 
-        Not exposed as a tool — the live e2e suite uses it to plant the
-        throwaway message it then reads, moves, and removes.
+        Not exposed as a tool of its own. ``yandex_mail_send_message`` uses it to
+        file the copy of a sent message in Sent, and the live e2e suite uses it
+        to plant the throwaway message it then reads, moves, and removes.
         """
         conn = self.connect()
         self._selected = None

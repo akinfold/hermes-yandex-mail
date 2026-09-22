@@ -26,7 +26,8 @@ body:
     attributes:
       label: Feasibility
       description: >
-        Yandex Mail has no public REST API; this plugin speaks IMAP, which reads and
-        organises an existing mailbox but cannot send mail (that would be SMTP).
+        Yandex Mail has no public REST API; this plugin speaks IMAP to read and organise
+        an existing mailbox, and SMTP to send — sending is off unless YANDEX_MAIL_ACTIONS
+        names send_message explicitly.
       options:
-        - label: I have checked that IMAP can express this (or I am not sure — please advise)
+        - label: I have checked that IMAP or SMTP can express this (or I am not sure — please advise)
