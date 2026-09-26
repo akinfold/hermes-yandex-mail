@@ -77,8 +77,9 @@ DEFAULT_TOOLS = {
 # the two in step, so the tests below cannot drift into checking something the
 # README does not say.
 GIT_INSTALL = "hermes plugins install akinfold/hermes-yandex-mail/hermes_yandex_mail --enable"
+GIT_UPDATE = "hermes plugins update yandex_mail"
 GIT_UPGRADE = GIT_INSTALL + " --force"
-#: For a Hermes from the 0.21-era installer only; see README.md, Option B.
+#: For a Hermes in the older layout only; see README.md, Option B.
 PYPI_INSTALL = (
     "~/.hermes/bin/uv pip install --python ~/.hermes/hermes-agent/venv/bin/python"
     " hermes-yandex-mail"
@@ -269,6 +270,7 @@ def test_readme_gives_the_commands_under_test() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     for command in (
         GIT_INSTALL,
+        GIT_UPDATE,
         GIT_UPGRADE,
         PYPI_INSTALL,
         DROPIN_INSTALL,
@@ -300,6 +302,23 @@ def test_git_install_asks_for_credentials_loads_and_upgrades(home: Home) -> None
         assert f"{name}:" not in out, out
     assert home.credentials() == PROMPT_ANSWERS
     _assert_loaded(home, source="user")
+
+
+@install
+def test_git_install_updates_with_hermes_plugins_update(home: Home) -> None:
+    """README.md's usual upgrade for Option A: Hermes' own ``plugins update``.
+
+    It installs from the default branch, not the commit under test, so this
+    checks that the command upgrades this plugin's kind of install, not what it
+    installs: after it, the manifest marked 0.0.0 must be gone.
+    """
+    answers = "".join(PROMPT_ANSWERS[name] + "\n" for name in REQUIRED_ENV)
+    home.run(GIT_INSTALL, answers=answers)
+    _make_stale(home)
+    home.run(GIT_UPDATE)
+    [plugin] = [plugin for plugin in home.probe()["plugins"] if plugin["name"] == PLUGIN]
+    assert plugin["version"] != "0.0.0", f"`{GIT_UPDATE}` replaced nothing: {plugin}"
+    _assert_loaded(home, source="user", version=None)
 
 
 @install

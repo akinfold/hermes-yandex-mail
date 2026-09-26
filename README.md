@@ -526,16 +526,23 @@ for credentials here either: add them to `~/.hermes/.env` yourself.
 
 ### Upgrading
 
-Upgrade the way you installed. Option A — the same command with `--force`, which
-replaces the installed copy and keeps your credentials:
+Upgrade the way you installed. Option A — Hermes 0.21.5 and later install the
+new version from the source they recorded:
+
+```bash
+hermes plugins update yandex_mail
+```
+
+Older Hermes cannot update an install from a plugin directory, and no Hermes
+updates one pinned with `--ref`: run the install command again with `--force`,
+which replaces the installed copy and keeps your credentials.
 
 ```bash
 hermes plugins install akinfold/hermes-yandex-mail/hermes_yandex_mail --enable --force
 ```
 
-(`hermes plugins update` cannot do it: Hermes keeps only the plugin's directory,
-not the Git metadata of the repository it came from. And unlike a first install,
-`--force` does not stop to ask when Hermes' security scan reports a caution.)
+Both scan the new version again, but unlike a first install neither stops to ask
+when Hermes' security scan reports a caution.
 
 Option C — unzip the new release's archive over the old one:
 
