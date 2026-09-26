@@ -37,15 +37,22 @@ HIDDEN_LIMIT = 1024 * 1024
 
 _COMMENT = "!--"
 _BREAKS = frozenset({"br", "/p", "/div", "/tr", "/h1", "/h2", "/h3", "/h4", "/h5", "/h6"})
+#: An end tag as a browser reads it: the name may be followed by whitespace or
+#: "/" and then anything up to ">", so "</script foo=bar>" ends a script too.
+#: What follows the name is capped, so a match never depends on where the
+#: input was split (see _END_OVERLAP).
+_END_TAG = r"</{}(?:[\s/][^>]{{0,128}})?>"
 _ENDS = {
-    "script": re.compile(r"</script\s*>", re.IGNORECASE),
-    "style": re.compile(r"</style\s*>", re.IGNORECASE),
+    "script": re.compile(_END_TAG.format("script"), re.IGNORECASE),
+    "style": re.compile(_END_TAG.format("style"), re.IGNORECASE),
     # The lookahead leaves <body> in place, to be removed like any other tag.
-    "head": re.compile(r"</head\s*>|(?=<body[\s/>])", re.IGNORECASE),
-    # "<!-->" and "<!--->" are complete, empty comments.
-    _COMMENT: re.compile(r"\A-?>|-->"),
+    "head": re.compile(_END_TAG.format("head") + r"|(?=<body[\s/>])", re.IGNORECASE),
+    # "<!-->" and "<!--->" are complete, empty comments, and a browser also
+    # ends a comment at "--!>".
+    _COMMENT: re.compile(r"\A-?>|--!?>"),
 }
-#: How far back to search again for an end tag that a split may have cut.
+#: How far back to search again for an end tag that a split may have cut:
+#: more than the longest end tag the patterns above can match.
 _END_OVERLAP = 256
 _TAG_NAME = re.compile(r"/?[A-Za-z][A-Za-z0-9]*")
 #: Enough of a tag to know its name, or that it opens a comment.

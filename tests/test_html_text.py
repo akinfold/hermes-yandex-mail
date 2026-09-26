@@ -53,10 +53,35 @@ def test_the_rules(document, expected):
         "<p>A &amp; B &#1049;&nbsp;C</p><!--x--><br>D",
         "<p>Visible.</p><script>var x = 1;<p>After an unclosed script.</p>",
         "<!-->shown<!--->also shown",
+        '<p>a</p><!-- x --!> b <!-- y -->c<script>s</script foo="bar">d',
     ],
 )
 def test_where_the_input_is_split_changes_nothing(document, width):
     assert convert(document, width) == convert(document)
+
+
+@pytest.mark.parametrize(
+    "document,expected",
+    [
+        # A browser ends a comment at "--!>", so what follows is shown, not
+        # swallowed up to the next "-->".
+        ("<!-- hidden --!>shown", "shown"),
+        ("<p>a</p><!-- x --!> b <!-- y -->c", "a\nb c"),
+        # ...and ends an element at an end tag that carries attributes or "/".
+        ('<script>x</script foo="bar">after', "after"),
+        ("<style>p{}</style/>after", "after"),
+        ("<head><title>T</title></head class=x>Body", "Body"),
+        ("<SCRIPT>x</Script\t\n>after", "after"),
+    ],
+)
+def test_elements_end_where_a_browser_ends_them(document, expected):
+    assert convert(document) == expected
+
+
+@pytest.mark.parametrize("width", [1, 2, 7, 64])
+def test_an_end_tag_too_long_to_match_is_treated_the_same_at_every_split(width):
+    document = "<script>x</script " + "a" * 200 + ">after"
+    assert convert(document, width) == convert(document) == "xafter"
 
 
 def test_an_inline_image_of_any_size_is_skipped():
