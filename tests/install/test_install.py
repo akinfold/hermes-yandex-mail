@@ -169,6 +169,10 @@ class Home:
         lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
         return dict(line.split("=", 1) for line in lines if "=" in line and line[0] != "#")
 
+    def credentials(self) -> dict[str, str]:
+        """This plugin's variables in ``~/.hermes/.env``; the installer writes its own there too."""
+        return {key: value for key, value in self.dotenv().items() if key in REQUIRED_ENV}
+
 
 class _Snapshot:
     """The parts of ``~/.hermes`` an install changes, to put back afterwards."""
@@ -212,7 +216,7 @@ def home(tmp_path: Path):
     )
     home = Home(root, env)
     assert home.listed() == [], f"{PLUGIN} is already visible to this Hermes before the install"
-    assert not set(home.dotenv()) & set(REQUIRED_ENV), "credentials are already in ~/.hermes/.env"
+    assert home.credentials() == {}, "credentials are already in ~/.hermes/.env"
     snapshot = _Snapshot(home.hermes_home, tmp_path)
     try:
         yield home
@@ -266,7 +270,7 @@ def test_git_install_asks_for_credentials_loads_and_upgrades(home: Home) -> None
     assert "may not be a valid Hermes plugin" not in out, out
     for name in REQUIRED_ENV:
         assert f"{name}:" in out, f"the install never asked for {name}:\n{out}"
-    assert home.dotenv() == PROMPT_ANSWERS
+    assert home.credentials() == PROMPT_ANSWERS
     _assert_loaded(home, source="user")
 
     # README.md's upgrade: the same command with --force. The credentials are
@@ -274,7 +278,7 @@ def test_git_install_asks_for_credentials_loads_and_upgrades(home: Home) -> None
     out = _flat(home.run(GIT_UPGRADE + ref))
     for name in REQUIRED_ENV:
         assert f"{name}:" not in out, out
-    assert home.dotenv() == PROMPT_ANSWERS
+    assert home.credentials() == PROMPT_ANSWERS
     _assert_loaded(home, source="user")
 
 

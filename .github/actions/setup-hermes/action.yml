@@ -40,8 +40,6 @@ runs:
         fi
         args=(--non-interactive --skip-setup --skip-browser)
         [ "$ref" = main ] || args+=(--branch "$ref")
-        # pm's Node build links against libatomic, which slim images lack.
-        ldconfig -p | grep -q 'libatomic\.so\.1' || sudo apt-get install -y -qq libatomic1
         # Saved first rather than piped: its stdin is kept away from any prompt.
         curl -fsSL -o "$RUNNER_TEMP/hermes-install.sh" \
           "https://raw.githubusercontent.com/NousResearch/hermes-agent/$ref/scripts/install.sh"
