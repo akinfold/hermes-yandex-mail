@@ -101,8 +101,8 @@ tested. Live tests go under `tests/e2e/`, are marked `@pytest.mark.e2e`,
 and skip when credentials are absent.
 
 The install check lives in `tests/install/` and is marked `install`. It installs
-the Git tree, the drop-in archive, and (on a Hermes from the 0.21-era installer)
-the built wheel into a real Hermes set up by its official installer, using the
+the Git tree, the drop-in archive, and (on a Hermes in the older layout) the
+built wheel into a real Hermes set up by its official installer, using the
 commands the README gives, and asks Hermes what it loaded. Change an install
 instruction in the README and you change the test:
 `test_readme_gives_the_commands_under_test`, which runs with the unit tests, fails

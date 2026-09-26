@@ -5,7 +5,7 @@ installer set up in this account — the ``setup-hermes`` action does that in CI
 and run the commands README.md gives, as written. Success is whatever Hermes
 reports afterwards: ``hermes plugins list``, and the plugins and tools its own
 plugin manager hands the agent (see ``probe.py``, run in Hermes' own Python,
-which ``hermes_env.py`` finds for either installer).
+which ``hermes_env.py`` finds).
 
 Where the tests depart from the README text, and why:
 
@@ -14,10 +14,15 @@ Where the tests depart from the README text, and why:
 * the PyPI install names the wheel about to be published instead of the
   project, so it cannot pick up the release already on PyPI;
 * the drop-in archive is the one about to be attached to the release, and its
-  ``<version>`` placeholder is filled in.
+  ``<version>`` placeholder is filled in;
+* before an upgrade, the installed copy's manifest is set to version 0.0.0, so
+  the version check afterwards proves the upgrade really replaced the files.
 
-The PyPI route runs only on a Hermes from the 0.21-era installer, which is the
-only one README.md gives a PyPI command for; on a pm-built Hermes it is skipped.
+The PyPI route applies only to a Hermes in the older layout (its virtualenv in
+``~/.hermes/hermes-agent/venv``), the only one README.md gives a PyPI command
+for. On Hermes ``main``, which pm builds, it is skipped. On the latest release it
+must run: once a release ships the pm layout, the test fails there rather than
+skipping, because README.md then needs changing.
 
 Each test changes the Hermes it runs against, then puts back what it changed:
 the plugin directories, ``config.yaml``, ``.env``, and a package installed from
@@ -127,13 +132,15 @@ class Home:
     def hermes_home(self) -> Path:
         return self.path / ".hermes"
 
-    def run(self, command: str, *, answers: str = "", check: bool = True) -> str:
+    def run(
+        self, command: str, *, answers: str = "", check: bool = True, cwd: Path | None = None
+    ) -> str:
         """Run a shell command as the user would; fail on a non-zero exit if *check*."""
         result = subprocess.run(
             ["bash", "-c", command],
             input=answers,
             env=self.env,
-            cwd=self.path,
+            cwd=cwd or self.path,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -189,7 +196,8 @@ class _Snapshot:
         }
 
     def restore(self) -> None:
-        shutil.rmtree(self.plugins, ignore_errors=True)
+        if self.plugins.is_dir():
+            shutil.rmtree(self.plugins)
         if self.saved_plugins.is_dir():
             shutil.copytree(self.saved_plugins, self.plugins, symlinks=True)
         for name, content in self.files.items():
@@ -228,7 +236,16 @@ def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
-def _assert_loaded(home: Home, *, source: str) -> None:
+def _make_stale(home: Home) -> None:
+    """Mark the installed copy as version 0.0.0, so only a real upgrade passes the version check."""
+    manifest = home.hermes_home / "plugins" / PLUGIN / "plugin.yaml"
+    text = manifest.read_text(encoding="utf-8")
+    stale = re.sub(r"(?m)^version:.*$", "version: 0.0.0", text, count=1)
+    assert stale != text, "the installed manifest has no version line"
+    manifest.write_text(stale, encoding="utf-8")
+
+
+def _assert_loaded(home: Home, *, source: str, version: str | None = VERSION) -> None:
     """Hermes lists the plugin as enabled, loads it, and gives the agent its tools."""
     assert [row["status"] for row in home.listed()] == ["enabled"], home.listed()
 
@@ -239,7 +256,9 @@ def _assert_loaded(home: Home, *, source: str) -> None:
     assert plugin["error"] is None, plugin["error"]
     assert plugin["enabled"], plugin
     assert plugin["source"] == source, plugin
-    assert plugin["version"] == VERSION, plugin
+    if version is None:
+        return
+    assert plugin["version"] == version, plugin
     assert plugin["tools"] == len(DEFAULT_TOOLS), plugin
 
     mine = {name: toolset for name, toolset in report["tools"].items() if toolset == PLUGIN}
@@ -275,6 +294,7 @@ def test_git_install_asks_for_credentials_loads_and_upgrades(home: Home) -> None
 
     # README.md's upgrade: the same command with --force. The credentials are
     # already there, so nothing is asked again.
+    _make_stale(home)
     out = _flat(home.run(GIT_UPGRADE + ref))
     for name in REQUIRED_ENV:
         assert f"{name}:" not in out, out
@@ -285,9 +305,14 @@ def test_git_install_asks_for_credentials_loads_and_upgrades(home: Home) -> None
 @install
 def test_pypi_install_loads(home: Home) -> None:
     if is_pm_install(home.hermes_home):
+        if os.environ.get("INSTALL_CHECK_CHANNEL") == "release":
+            pytest.fail(
+                "the latest Hermes release runs from pm-built environments: README.md's "
+                "Option B command no longer applies to it, so change README.md and this test"
+            )
         pytest.skip(
             "this Hermes runs from environments its package manager builds; README.md gives "
-            "the PyPI command only for a Hermes from the 0.21-era installer"
+            "the PyPI command only for a Hermes in the older layout"
         )
     wheel = _one("*.whl")
     try:
@@ -304,22 +329,23 @@ def test_pypi_install_loads(home: Home) -> None:
 
 
 @install
-def test_dropin_archive_loads_and_upgrades(home: Home) -> None:
+def test_dropin_archive_loads_and_upgrades(home: Home, tmp_path: Path) -> None:
     archive = _one(f"{PROJECT}-plugin-*.zip")
     assert archive.name == f"{PROJECT}-plugin-{VERSION}.zip", archive.name
-    shutil.copy(archive, home.path / archive.name)
-    try:
-        home.run(DROPIN_INSTALL.replace("<version>", VERSION))
-        assert (home.hermes_home / "plugins" / PLUGIN / "plugin.yaml").is_file()
-        home.run(ENABLE)
-        home.run(ADD_CREDENTIALS)
-        _assert_loaded(home, source="user")
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    shutil.copy(archive, downloads / archive.name)
 
-        # README.md's upgrade: unzip the new archive over the old one.
-        home.run(DROPIN_UPGRADE.replace("<version>", VERSION))
-        _assert_loaded(home, source="user")
-    finally:
-        (home.path / archive.name).unlink(missing_ok=True)
+    home.run(DROPIN_INSTALL.replace("<version>", VERSION), cwd=downloads)
+    assert (home.hermes_home / "plugins" / PLUGIN / "plugin.yaml").is_file()
+    home.run(ENABLE)
+    home.run(ADD_CREDENTIALS)
+    _assert_loaded(home, source="user")
+
+    # README.md's upgrade: unzip the new archive over the old one.
+    _make_stale(home)
+    home.run(DROPIN_UPGRADE.replace("<version>", VERSION), cwd=downloads)
+    _assert_loaded(home, source="user")
 
 
 @install

@@ -488,14 +488,14 @@ plugin. Hermes finds it through the `hermes_agent.plugins` entry point.
 hermes plugins enable yandex_mail
 ```
 
-**A standard Hermes install has no place for this.** Since 24 September 2026 the
-official installer runs Hermes from environments its package manager builds and
-replaces, and Hermes does not support adding packages to them by hand: use
-Option A or C.
+**Not for a standard Hermes install.** Since 24 September 2026 the official
+installer runs Hermes from environments its package manager builds and replaces,
+and Hermes does not support adding packages to them by hand: use Option A or C.
 
-Hermes 0.21.5 and earlier, set up by their own installer, run from
-`~/.hermes/hermes-agent/venv`, and Hermes keeps its own `uv` in `~/.hermes/bin`.
-There this works:
+A Hermes in the older layout — one that runs from `~/.hermes/hermes-agent/venv`
+and keeps its own `uv` in `~/.hermes/bin`, with no `~/.hermes/installs`, which is
+what Hermes 0.21.5 and anything installed before that date and not updated since
+look like — takes the package like this:
 
 ```bash
 ~/.hermes/bin/uv pip install --python ~/.hermes/hermes-agent/venv/bin/python hermes-yandex-mail
@@ -533,18 +533,26 @@ replaces the installed copy and keeps your credentials:
 hermes plugins install akinfold/hermes-yandex-mail/hermes_yandex_mail --enable --force
 ```
 
+(`hermes plugins update` cannot do it: Hermes keeps only the plugin's directory,
+not the Git metadata of the repository it came from. And unlike a first install,
+`--force` does not stop to ask when Hermes' security scan reports a caution.)
+
 Option C — unzip the new release's archive over the old one:
 
 ```bash
 unzip -o hermes-yandex-mail-plugin-<version>.zip -d ~/.hermes/plugins/
 ```
 
-Option B — install the new version into the same environment.
+Option B — upgrade the package in the same environment: in the older layout,
+
+```bash
+~/.hermes/bin/uv pip install --upgrade --python ~/.hermes/hermes-agent/venv/bin/python hermes-yandex-mail
+```
 
 Options A and C, and their upgrades, are checked before every release by
 installing the build into a real Hermes — the latest release and `main`, each set
-up by its official installer — exactly as written here; Option B is checked on
-the latest release, where the command above applies. See
+up by its official installer — exactly as written here; the Option B install is
+checked on the latest release while it still has the older layout. See
 [Checking the install paths](#checking-the-install-paths).
 
 ## Development
@@ -589,8 +597,8 @@ Or keep both out of the command line, in `~/.yandex-mail-login` and
 
 The **E2E (live)** workflow is manual (`workflow_dispatch`). It reads
 `YANDEX_MAIL_LOGIN` and `YANDEX_MAIL_APP_PASSWORD` from a GitHub Environment
-named `yandex-mail-e2e`. It runs the plugin inside a real Hermes, set up the way
-the Hermes installer sets it up: the latest Hermes release by default, and its
+named `yandex-mail-e2e`. It runs the plugin inside a real Hermes, installed by
+its official installer: the latest Hermes release by default, and its
 `hermes` input switches to Hermes `main` or to no Hermes at all. With Hermes, the
 tests run in Hermes' own Python, with this checkout on its path rather than
 installed into Hermes' environment, and the run fails outright if the plugin
