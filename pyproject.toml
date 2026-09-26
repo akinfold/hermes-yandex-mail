@@ -9,7 +9,7 @@ description = "Yandex Mail plugin for Hermes Agent: search, read, flag, move and
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.11"
 authors = [{ name = "Roman Akinfeev" }]
 keywords = ["hermes", "hermes-agent", "plugin", "yandex", "mail", "email", "imap", "smtp"]
 classifiers = [
@@ -17,6 +17,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Communications :: Email",
 ]
 # No runtime dependencies: IMAP and MIME parsing come from the standard library.

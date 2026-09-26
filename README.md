@@ -37,12 +37,13 @@ your real mailbox, over IMAP, with no third-party service in the middle.
 - 🔑 **App password, not your account password** — scoped to mail, revocable in
   one click.
 
-Tested against Hermes **0.19.x–0.21.x**, Python **3.11–3.13**.
+Checked before every release against the latest Hermes release and Hermes `main`,
+each installed by its official installer; Python **3.11–3.14**.
 
 ## Quick start
 
 ```bash
-# 1. Install into Hermes (or from PyPI — see Installing, Option B). It asks for
+# 1. Install into Hermes (other ways: see Installing the plugin). It asks for
 #    your login and an app password, which comes from
 #    https://id.yandex.ru/security/app-passwords (scope: "Почта" / Mail)
 hermes plugins install akinfold/hermes-yandex-mail/hermes_yandex_mail --enable
@@ -469,33 +470,45 @@ name `yandex_mail`, and `--enable` enables that name. It also scans only that
 directory, so the tests and workflows in this repository stay out of the security
 report.
 
-Point it at the repository root instead and the install still appears to succeed,
-but it copies a directory with no manifest and no `register(ctx)` in it: Hermes
-warns that it "may not be a valid Hermes plugin", asks for nothing, and enables the
-repository name, which nothing answers to. `hermes plugins list` then still shows
-`yandex_mail` — the package nested in the clone is found — but shows it as **not
-enabled**, which is the symptom to look for. If you installed that way, remove
-`~/.hermes/plugins/hermes-yandex-mail` and install again with the directory named.
+Point it at the repository root instead and Hermes copies a directory with no
+manifest and no `register(ctx)` in it: it warns that it "may not be a valid Hermes
+plugin", asks for no credentials, and does not enable the plugin. `hermes plugins
+list` then still shows `yandex_mail` — the package nested in the clone is found —
+but shows it as **not enabled**, which is the symptom to look for. If you
+installed that way, remove `~/.hermes/plugins/hermes-yandex-mail` and install
+again with the directory named.
 
 ### Option B — from PyPI
 
-Install the package into the virtualenv Hermes runs from, then enable it. With
-the standard Hermes install that virtualenv is `~/.hermes/hermes-agent/venv`
-(`/usr/local/lib/hermes-agent/venv` if the installer ran as root on Linux), and
-Hermes keeps its own `uv` in `~/.hermes/bin`:
+For a Hermes whose Python environment you manage yourself — your own virtualenv,
+a Nix build: install `hermes-yandex-mail` into that environment, then enable the
+plugin. Hermes finds it through the `hermes_agent.plugins` entry point.
+
+```bash
+hermes plugins enable yandex_mail
+```
+
+**Not for a standard Hermes install.** Since 24 September 2026 the official
+installer runs Hermes from environments its package manager builds and replaces,
+and Hermes does not support adding packages to them by hand: use Option A or C.
+
+A Hermes in the older layout — one that runs from `~/.hermes/hermes-agent/venv`
+and keeps its own `uv` in `~/.hermes/bin`, with no `~/.hermes/installs`, which is
+what Hermes 0.21.5 and anything installed before that date and not updated since
+look like — takes the package like this:
 
 ```bash
 ~/.hermes/bin/uv pip install --python ~/.hermes/hermes-agent/venv/bin/python hermes-yandex-mail
 hermes plugins enable yandex_mail
 ```
 
-A bare `pip install hermes-yandex-mail` does not get there: the installer builds
-that virtualenv with `uv` and without `pip`, so the `pip` on your `PATH` belongs
-to some other Python, and Hermes never sees the plugin. If you installed Hermes
-another way, install the package into whichever environment the `hermes` command
-runs from. Hermes finds it through the `hermes_agent.plugins` entry point. Nothing
-asks for credentials on this path — add them to `~/.hermes/.env` as in the
-[Quick start](#quick-start).
+Switch such an install to Option A before you run `hermes update`: the update
+moves Hermes onto the new environments, and a package installed this way does not
+come along. A bare `pip install hermes-yandex-mail` never reached Hermes at all —
+the `pip` on your `PATH` belongs to some other Python.
+
+Nothing asks for credentials on this path — add them to `~/.hermes/.env` as in
+the [Quick start](#quick-start).
 
 ### Option C — drop-in directory
 
@@ -508,12 +521,46 @@ unzip hermes-yandex-mail-plugin-<version>.zip -d ~/.hermes/plugins/
 hermes plugins enable yandex_mail
 ```
 
-You should end up with `~/.hermes/plugins/yandex_mail/plugin.yaml`. As with
-Option B, add the credentials to `~/.hermes/.env` yourself.
+You should end up with `~/.hermes/plugins/yandex_mail/plugin.yaml`. Nothing asks
+for credentials here either: add them to `~/.hermes/.env` yourself.
 
-All three options are checked before every release by installing the build into
-a real Hermes — the latest release and `main` — exactly as written here; see
-[Development](#development).
+### Upgrading
+
+Upgrade the way you installed. Option A — Hermes 0.21.5 and later install the
+new version from the source they recorded:
+
+```bash
+hermes plugins update yandex_mail
+```
+
+Older Hermes cannot update an install from a plugin directory, and no Hermes
+updates one pinned with `--ref`: run the install command again with `--force`,
+which replaces the installed copy and keeps your credentials.
+
+```bash
+hermes plugins install akinfold/hermes-yandex-mail/hermes_yandex_mail --enable --force
+```
+
+Both scan the new version again, but unlike a first install neither stops to ask
+when Hermes' security scan reports a caution.
+
+Option C — unzip the new release's archive over the old one:
+
+```bash
+unzip -o hermes-yandex-mail-plugin-<version>.zip -d ~/.hermes/plugins/
+```
+
+Option B — upgrade the package in the same environment: in the older layout,
+
+```bash
+~/.hermes/bin/uv pip install --upgrade --python ~/.hermes/hermes-agent/venv/bin/python hermes-yandex-mail
+```
+
+Options A and C, and their upgrades, are checked before every release by
+installing the build into a real Hermes — the latest release and `main`, each set
+up by its official installer — exactly as written here; the Option B install is
+checked on the latest release while it still has the older layout. See
+[Checking the install paths](#checking-the-install-paths).
 
 ## Development
 
@@ -557,27 +604,29 @@ Or keep both out of the command line, in `~/.yandex-mail-login` and
 
 The **E2E (live)** workflow is manual (`workflow_dispatch`). It reads
 `YANDEX_MAIL_LOGIN` and `YANDEX_MAIL_APP_PASSWORD` from a GitHub Environment
-named `yandex-mail-e2e`. It runs the plugin inside a real Hermes, set up the way
-the Hermes installer sets it up: the latest Hermes release by default, and its
+named `yandex-mail-e2e`. It runs the plugin inside a real Hermes, installed by
+its official installer: the latest Hermes release by default, and its
 `hermes` input switches to Hermes `main` or to no Hermes at all. With Hermes, the
-run fails outright if the plugin cannot import it, rather than testing the
-plugin's stand-ins instead.
+tests run in Hermes' own Python, with this checkout on its path rather than
+installed into Hermes' environment, and the run fails outright if the plugin
+cannot import Hermes, rather than testing the plugin's stand-ins instead.
 
 ## Checking the install paths
 
 The `install`-marked tests in `tests/install/` install the built plugin into a
-real Hermes, set up the way the official installer sets it up, by each option in
+real Hermes, set up by its official installer, by each option in
 [Installing the plugin into Hermes](#installing-the-plugin-into-hermes) — running
-the README's own commands — and then ask Hermes what it loaded: the plugin must be
-listed as enabled, load without error, and give the agent its tools. They also
-check that installing from the repository root still looks the way this README
-describes. A fast unit test keeps the commands in the tests and in this README
-identical.
+the README's own commands, upgrades included — and then ask Hermes what it
+loaded: the plugin must be listed as enabled, load without error, and give the
+agent its tools. They also check that installing from the repository root still
+looks the way this README describes. A fast unit test keeps the commands in the
+tests and in this README identical.
 
 The **Install check** workflow runs them against the latest Hermes release and
 against Hermes `main` on every pull request, and on every release tag before
 anything is published: the GitHub Release and the PyPI upload both wait for it.
-To run them locally, see the docstring of `tests/install/test_install.py`.
+They install into a real `~/.hermes`, so run them yourself only in a container or
+VM — see the docstring of `tests/install/test_install.py`.
 
 ## Related Hermes plugins
 
@@ -595,11 +644,8 @@ Part of a family of Yandex plugins for Hermes Agent:
 `check_hostname=False`: the connection was encrypted but unauthenticated, so
 anyone positioned to intercept it — a hostile Wi-Fi network, a spoofed DNS
 answer, an intercepting proxy — could present their own certificate and read
-the app password and every message. **0.2.1 fixes this; upgrade.**
-
-```bash
-pip install --upgrade hermes-yandex-mail
-```
+the app password and every message. **0.2.1 fixes this; upgrade** — see
+[Upgrading](#upgrading).
 
 If you ran an earlier version over a network you do not control, revoke the app
 password at <https://id.yandex.ru/security/app-passwords> and issue a new one.
