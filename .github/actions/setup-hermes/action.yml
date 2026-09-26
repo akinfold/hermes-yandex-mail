@@ -40,9 +40,17 @@ runs:
         fi
         args=(--non-interactive --skip-setup --skip-browser)
         [ "$ref" = main ] || args+=(--branch "$ref")
-        # Saved first rather than piped: its stdin is kept away from any prompt.
-        curl -fsSL -o "$RUNNER_TEMP/hermes-install.sh" \
-          "https://raw.githubusercontent.com/NousResearch/hermes-agent/$ref/scripts/install.sh"
+        # The script the one-line install serves, fetched through the API with the
+        # job's token (unauthenticated raw downloads get rate-limited on shared
+        # runners), and saved rather than piped so its stdin stays away from any
+        # prompt.
+        for attempt in 1 2 3 4 5; do
+          gh api -H "Accept: application/vnd.github.raw" \
+            "repos/NousResearch/hermes-agent/contents/scripts/install.sh?ref=$ref" \
+            > "$RUNNER_TEMP/hermes-install.sh" && break
+          [ "$attempt" = 5 ] && exit 1
+          sleep $((attempt * 10))
+        done
         bash "$RUNNER_TEMP/hermes-install.sh" "${args[@]}" </dev/null
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
         python=$(python3 "$GITHUB_WORKSPACE/tests/install/hermes_env.py")
