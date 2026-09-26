@@ -42,8 +42,10 @@ runs:
         [ "$ref" = main ] || args+=(--branch "$ref")
         # pm's Node build links against libatomic, which slim images lack.
         ldconfig -p | grep -q 'libatomic\.so\.1' || sudo apt-get install -y -qq libatomic1
-        curl -fsSL "https://raw.githubusercontent.com/NousResearch/hermes-agent/$ref/scripts/install.sh" \
-          | bash -s -- "${args[@]}" </dev/null
+        # Saved first rather than piped: its stdin is kept away from any prompt.
+        curl -fsSL -o "$RUNNER_TEMP/hermes-install.sh" \
+          "https://raw.githubusercontent.com/NousResearch/hermes-agent/$ref/scripts/install.sh"
+        bash "$RUNNER_TEMP/hermes-install.sh" "${args[@]}" </dev/null
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
         python=$(python3 "$GITHUB_WORKSPACE/tests/install/hermes_env.py")
         test -x "$python"
