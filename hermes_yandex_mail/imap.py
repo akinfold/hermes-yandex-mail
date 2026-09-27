@@ -927,11 +927,15 @@ class YandexIMAPClient:
     def fetch_message(
         self, folder: str, uid: str, mark_seen: bool = False
     ) -> tuple[bytes, tuple[str, ...]]:
-        """Return the raw bytes and flags of one message.
+        """Return the raw bytes and flags of one message, up to 10 MiB.
 
         ``mark_seen`` decides between ``BODY[]`` (which sets ``\\Seen``) and
         ``BODY.PEEK[]`` (which does not) — reading a message must not silently
         change its state.
+
+        Not used by any tool: ``yandex_mail_read_message`` streams only the
+        text parts (see :meth:`iter_part`). The live e2e suite uses it to
+        check the raw headers of a reply the plugin sent.
         """
         self._select(folder, readonly=not mark_seen)
         part = "BODY[]" if mark_seen else "BODY.PEEK[]"
