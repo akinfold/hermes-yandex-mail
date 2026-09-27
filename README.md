@@ -214,10 +214,15 @@ Permissions are checked again each time a registered tool runs, against the
 value the running Hermes holds at that moment. A narrower value written in
 `~/.hermes/.env` therefore takes effect without a restart once Hermes has
 re-read the file — the gateway does so for every message, and the CLI when you
-run `/reload`. A value exported into the environment Hermes was started from,
-rather than written in `~/.hermes/.env`, stays in force until Hermes restarts.
-Restart Hermes after changing configuration in any case, so its visible toolset
-also reflects the change.
+run `/reload`. Deleting or commenting out the line is not such a value, even
+though unset means the default set: re-reading the file does not remove a
+plugin's variable that is no longer in it, so Hermes keeps the value it already
+loaded until it restarts. To narrow without a restart, write the narrower value
+instead — `YANDEX_MAIL_ACTIONS=all` for the default set. A value exported into
+the environment Hermes was started from, rather than written in
+`~/.hermes/.env`, stays in force until Hermes restarts. Restart Hermes after
+changing configuration in any case, so its visible toolset also reflects the
+change.
 
 Reading with `mark_read=true` also requires `mark_message` permission. The `read`
 group alone always leaves the message's read/unread state unchanged.
