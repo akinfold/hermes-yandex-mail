@@ -753,24 +753,38 @@ def test_permanent_delete_refuses_without_uidplus(fake_imap):
 
 
 def test_delete_without_a_trash_folder_explains_itself():
+    """The refusal states the fact and nothing more, so the whole text is
+    pinned: any sentence added to it is a sentence the model may act on."""
     fake = FakeIMAP(list_data=[b'(\\HasNoChildren) "|" INBOX'])
     with make_client(fake) as client, pytest.raises(MailError) as excinfo:
         client.delete("INBOX", ["8"])
-    message = str(excinfo.value)
-    assert "no folder flagged \\Trash" in message
-    assert message.endswith("nothing was deleted.")
+    assert str(excinfo.value) == (
+        "This account has no folder flagged \\Trash to move the message into. "
+        "It was left untouched; nothing was deleted."
+    )
     assert fake.command_names() == []
 
 
-def test_delete_without_a_trash_folder_does_not_point_at_permanent_deletion():
-    """The model acts on an error's wording: a refusal that names the
-    irreversible option as the way out reads as permission to take it."""
+@pytest.mark.parametrize(
+    "steer",
+    [
+        "permanent",
+        "irreversibl",
+        "erase",
+        "expunge",
+        "yandex_mail_move_message",
+        "of your choice",
+    ],
+)
+def test_delete_without_a_trash_folder_offers_no_other_way_out(steer):
+    """The model acts on an error's wording: a refusal that offers another way
+    to get rid of the message, whether erasing it or moving it to a folder the
+    model picks, reads as permission to take it. The text above is pinned;
+    these words stay out of it however it is reworded."""
     fake = FakeIMAP(list_data=[b'(\\HasNoChildren) "|" INBOX'])
     with make_client(fake) as client, pytest.raises(MailError) as excinfo:
         client.delete("INBOX", ["8"])
-    message = str(excinfo.value).lower()
-    assert "permanent" not in message
-    assert "irreversibl" not in message
+    assert steer not in str(excinfo.value).lower()
 
 
 def test_delete_needs_uids(fake_imap):
