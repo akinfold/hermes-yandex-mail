@@ -676,6 +676,16 @@ def test_delete_to_trash_still_reports_destination_uids_under_an_allow_list(fake
     assert result["destination_uids"] == {"8": "13"}
 
 
+def _only_probed_trash(fake: FakeIMAP, uid_set: str) -> None:
+    """The one UID command was the bare existence probe, and Trash was only
+    ever EXAMINEd: nothing that could change the folder was sent."""
+    assert fake.command_names() == ["FETCH"]
+    probe = next(c for c in fake.calls if c[0] == "uid")
+    assert probe[2:] == (uid_set, "(UID)")
+    selects = [c for c in fake.calls if c[0] == "select"]
+    assert selects and all(readonly is True for _, _, readonly in selects)
+
+
 def test_delete_from_trash_reports_an_accurate_no_op(fake_imap):
     # This was the bug: deleting from Trash without permanent=True used to
     # return {"deleted": True, ...} while sending no command at all.
@@ -683,14 +693,45 @@ def test_delete_from_trash_reports_an_accurate_no_op(fake_imap):
         result = client.delete("Trash", ["8"])
     assert result["deleted"] is False
     assert result["reason"] == "already_in_trash"
-    assert fake_imap.command_names() == []
+    _only_probed_trash(fake_imap, "8")
 
 
 def test_delete_from_trash_is_detected_regardless_of_case(fake_imap):
     with make_client(fake_imap) as client:
         result = client.delete("trash", ["8"])
     assert result["deleted"] is False
-    assert fake_imap.command_names() == []
+    _only_probed_trash(fake_imap, "8")
+
+
+def test_delete_of_a_missing_uid_in_trash_is_not_found_not_already_in_trash(fake_imap):
+    """Only a message that is there is "already in Trash". A stale UID, or
+    one another client already erased, must not be reported as a message
+    left untouched in Trash, which implies it still exists."""
+    fake_imap.existing_uids = {"8"}
+    with make_client(fake_imap) as client, pytest.raises(MailError) as excinfo:
+        client.delete("Trash", ["404"])
+    assert "404 not found in 'Trash'" in str(excinfo.value)
+    _only_probed_trash(fake_imap, "404")
+
+
+def test_a_missing_uid_in_trash_gets_the_error_every_other_action_gives(fake_imap):
+    fake_imap.existing_uids = {"8"}
+    with make_client(fake_imap) as client:
+        with pytest.raises(MailError) as from_delete:
+            client.delete("Trash", ["404"])
+        with pytest.raises(MailError) as from_mark:
+            client.store_flags("Trash", ["404"], add=["\\Seen"])
+    assert str(from_delete.value) == str(from_mark.value)
+
+
+def test_a_partly_missing_batch_in_trash_is_refused_whole(fake_imap):
+    fake_imap.existing_uids = {"8"}
+    with make_client(fake_imap) as client, pytest.raises(MailError) as excinfo:
+        client.delete("Trash", ["8", "9"])
+    message = str(excinfo.value)
+    assert "9 not found" in message
+    assert "8" not in message.partition(" not found")[0]
+    _only_probed_trash(fake_imap, "8,9")
 
 
 def test_delete_permanently_expunges_only_those_uids(fake_imap):
@@ -712,9 +753,38 @@ def test_permanent_delete_refuses_without_uidplus(fake_imap):
 
 
 def test_delete_without_a_trash_folder_explains_itself():
+    """The refusal states the fact and nothing more, so the whole text is
+    pinned: any sentence added to it is a sentence the model may act on."""
     fake = FakeIMAP(list_data=[b'(\\HasNoChildren) "|" INBOX'])
-    with make_client(fake) as client, pytest.raises(MailError, match=r"no folder flagged"):
+    with make_client(fake) as client, pytest.raises(MailError) as excinfo:
         client.delete("INBOX", ["8"])
+    assert str(excinfo.value) == (
+        "This account has no folder flagged \\Trash to move the message into. "
+        "It was left untouched; nothing was deleted."
+    )
+    assert fake.command_names() == []
+
+
+@pytest.mark.parametrize(
+    "steer",
+    [
+        "permanent",
+        "irreversibl",
+        "erase",
+        "expunge",
+        "yandex_mail_move_message",
+        "of your choice",
+    ],
+)
+def test_delete_without_a_trash_folder_offers_no_other_way_out(steer):
+    """The model acts on an error's wording: a refusal that offers another way
+    to get rid of the message, whether erasing it or moving it to a folder the
+    model picks, reads as permission to take it. The text above is pinned;
+    these words stay out of it however it is reworded."""
+    fake = FakeIMAP(list_data=[b'(\\HasNoChildren) "|" INBOX'])
+    with make_client(fake) as client, pytest.raises(MailError) as excinfo:
+        client.delete("INBOX", ["8"])
+    assert steer not in str(excinfo.value).lower()
 
 
 def test_delete_needs_uids(fake_imap):

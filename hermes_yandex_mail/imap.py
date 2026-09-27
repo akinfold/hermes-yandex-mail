@@ -927,11 +927,15 @@ class YandexIMAPClient:
     def fetch_message(
         self, folder: str, uid: str, mark_seen: bool = False
     ) -> tuple[bytes, tuple[str, ...]]:
-        """Return the raw bytes and flags of one message.
+        """Return the raw bytes and flags of one message, up to 10 MiB.
 
         ``mark_seen`` decides between ``BODY[]`` (which sets ``\\Seen``) and
         ``BODY.PEEK[]`` (which does not) — reading a message must not silently
         change its state.
+
+        Not used by any tool: ``yandex_mail_read_message`` streams only the
+        text parts (see :meth:`iter_part`). The live e2e suite uses it to
+        check the raw headers of a reply the plugin sent.
         """
         self._select(folder, readonly=not mark_seen)
         part = "BODY[]" if mark_seen else "BODY.PEEK[]"
@@ -1242,6 +1246,13 @@ class YandexIMAPClient:
             #
             # Claiming success here without acting was the original bug: the
             # message never moved, and the caller was told it was deleted.
+            #
+            # Only a message that is actually here is "already in Trash". A
+            # UID that is not (a stale one, or one another client already
+            # erased) gets the same not-found error every other action
+            # gives, rather than a note implying the message still exists.
+            # EXAMINE and a bare UID probe: nothing here changes the folder.
+            self._verify_uids_exist(trash, uids, readonly=True)
             return {
                 "deleted": False,
                 "reason": "already_in_trash",
@@ -1276,14 +1287,17 @@ class YandexIMAPClient:
         not on the allow-list. A plain ``move`` call that names Trash
         explicitly is unaffected and still allow-list gated (see
         :meth:`move`).
+
+        Without such a folder the refusal states the fact and nothing more.
+        The model acts on an error's wording, so a text that pointed at
+        ``permanent=true`` as the way out would turn a failed soft delete
+        into an irreversible one the user never asked for.
         """
         trash = self.find_flagged_folder("trash")
         if trash is None:
             raise MailError(
-                "This account has no folder flagged \\Trash, so messages cannot be "
-                "soft-deleted. Move the message to a folder of your choice with "
-                "yandex_mail_move_message, or pass permanent=true if an irreversible "
-                "delete is really what is wanted."
+                "This account has no folder flagged \\Trash to move the message into. "
+                "It was left untouched; nothing was deleted."
             )
         return trash
 

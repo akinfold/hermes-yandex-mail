@@ -208,10 +208,21 @@ gates exist to prevent.
 
 A name that matches nothing is ignored, so a
 typo can only ever withhold a tool, never grant one — and a value that names
-nothing recognisable therefore registers nothing at all. Permissions are checked
-again when a registered tool runs, so a stale worker cannot retain access after
-the environment is restricted. Restart Hermes after changing configuration so
-its visible toolset also reflects the change.
+nothing recognisable therefore registers nothing at all.
+
+Permissions are checked again each time a registered tool runs, against the
+value the running Hermes holds at that moment. A narrower value written in
+`~/.hermes/.env` therefore takes effect without a restart once Hermes has
+re-read the file — the gateway does so for every message, and the CLI when you
+run `/reload`. Deleting or commenting out the line is not such a value, even
+though unset means the default set: re-reading the file does not remove a
+plugin's variable that is no longer in it, so Hermes keeps the value it already
+loaded until it restarts. To narrow without a restart, write the narrower value
+instead — `YANDEX_MAIL_ACTIONS=all` for the default set. A value exported into
+the environment Hermes was started from, rather than written in
+`~/.hermes/.env`, stays in force until Hermes restarts. Restart Hermes after
+changing configuration in any case, so its visible toolset also reflects the
+change.
 
 Reading with `mark_read=true` also requires `mark_message` permission. The `read`
 group alone always leaves the message's read/unread state unchanged.
@@ -503,9 +514,13 @@ hermes plugins enable yandex_mail
 ```
 
 Switch such an install to Option A before you run `hermes update`: the update
-moves Hermes onto the new environments, and a package installed this way does not
-come along. A bare `pip install hermes-yandex-mail` never reached Hermes at all —
-the `pip` on your `PATH` belongs to some other Python.
+moves Hermes onto the new environments, and a package installed this way does
+not come along. The loss is silent: `yandex_mail` stays enabled in the
+configuration, but its tools are gone, and neither the update nor
+`hermes doctor` mentions it. If you have already updated, run the Option A
+install now: it brings the tools back and keeps your credentials in
+`~/.hermes/.env`. A bare `pip install hermes-yandex-mail` never reached Hermes
+at all — the `pip` on your `PATH` belongs to some other Python.
 
 Nothing asks for credentials on this path — add them to `~/.hermes/.env` as in
 the [Quick start](#quick-start).
