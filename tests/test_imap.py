@@ -713,8 +713,23 @@ def test_permanent_delete_refuses_without_uidplus(fake_imap):
 
 def test_delete_without_a_trash_folder_explains_itself():
     fake = FakeIMAP(list_data=[b'(\\HasNoChildren) "|" INBOX'])
-    with make_client(fake) as client, pytest.raises(MailError, match=r"no folder flagged"):
+    with make_client(fake) as client, pytest.raises(MailError) as excinfo:
         client.delete("INBOX", ["8"])
+    message = str(excinfo.value)
+    assert "no folder flagged \\Trash" in message
+    assert message.endswith("nothing was deleted.")
+    assert fake.command_names() == []
+
+
+def test_delete_without_a_trash_folder_does_not_point_at_permanent_deletion():
+    """The model acts on an error's wording: a refusal that names the
+    irreversible option as the way out reads as permission to take it."""
+    fake = FakeIMAP(list_data=[b'(\\HasNoChildren) "|" INBOX'])
+    with make_client(fake) as client, pytest.raises(MailError) as excinfo:
+        client.delete("INBOX", ["8"])
+    message = str(excinfo.value).lower()
+    assert "permanent" not in message
+    assert "irreversibl" not in message
 
 
 def test_delete_needs_uids(fake_imap):

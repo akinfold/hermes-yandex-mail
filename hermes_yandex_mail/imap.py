@@ -1276,14 +1276,17 @@ class YandexIMAPClient:
         not on the allow-list. A plain ``move`` call that names Trash
         explicitly is unaffected and still allow-list gated (see
         :meth:`move`).
+
+        Without such a folder the refusal states the fact and nothing more.
+        The model acts on an error's wording, so a text that pointed at
+        ``permanent=true`` as the way out would turn a failed soft delete
+        into an irreversible one the user never asked for.
         """
         trash = self.find_flagged_folder("trash")
         if trash is None:
             raise MailError(
-                "This account has no folder flagged \\Trash, so messages cannot be "
-                "soft-deleted. Move the message to a folder of your choice with "
-                "yandex_mail_move_message, or pass permanent=true if an irreversible "
-                "delete is really what is wanted."
+                "This account has no folder flagged \\Trash to move the message into. "
+                "It was left untouched; nothing was deleted."
             )
         return trash
 
