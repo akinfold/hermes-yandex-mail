@@ -208,10 +208,16 @@ gates exist to prevent.
 
 A name that matches nothing is ignored, so a
 typo can only ever withhold a tool, never grant one — and a value that names
-nothing recognisable therefore registers nothing at all. Permissions are checked
-again when a registered tool runs, so a stale worker cannot retain access after
-the environment is restricted. Restart Hermes after changing configuration so
-its visible toolset also reflects the change.
+nothing recognisable therefore registers nothing at all.
+
+Permissions are checked again each time a registered tool runs, against the
+value the running Hermes holds at that moment. A narrower value written in
+`~/.hermes/.env` therefore takes effect without a restart once Hermes has
+re-read the file — the gateway does so for every message, and the CLI when you
+run `/reload`. A value exported into the environment Hermes was started from,
+rather than written in `~/.hermes/.env`, stays in force until Hermes restarts.
+Restart Hermes after changing configuration in any case, so its visible toolset
+also reflects the change.
 
 Reading with `mark_read=true` also requires `mark_message` permission. The `read`
 group alone always leaves the message's read/unread state unchanged.
