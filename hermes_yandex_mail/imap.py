@@ -1242,6 +1242,13 @@ class YandexIMAPClient:
             #
             # Claiming success here without acting was the original bug: the
             # message never moved, and the caller was told it was deleted.
+            #
+            # Only a message that is actually here is "already in Trash". A
+            # UID that is not (a stale one, or one another client already
+            # erased) gets the same not-found error every other action
+            # gives, rather than a note implying the message still exists.
+            # EXAMINE and a bare UID probe: nothing here changes the folder.
+            self._verify_uids_exist(trash, uids, readonly=True)
             return {
                 "deleted": False,
                 "reason": "already_in_trash",

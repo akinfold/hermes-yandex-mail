@@ -542,4 +542,13 @@ def test_delete_on_a_message_already_in_trash_sends_nothing_destructive(imap):
     assert result["deleted"] is False
     assert result["reason"] == "already_in_trash"
     assert "irreversible" in result["note"]
-    assert imap.command_names() == []
+    # The read-only existence probe is the only command sent.
+    assert imap.command_names() == ["FETCH"]
+
+
+def test_delete_of_a_missing_uid_in_trash_reports_it_missing(imap):
+    imap.existing_uids = {"8"}
+    result = call(tool.handle_delete, uid="404", folder="Trash")
+    assert "404 not found in 'Trash'" in result["error"]
+    assert "reason" not in result and "deleted" not in result
+    assert imap.command_names() == ["FETCH"]

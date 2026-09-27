@@ -115,7 +115,9 @@ def test_delete_in_trash_reports_no_change():
             "Erasing it permanently is a separate, irreversible action."
         ),
     }
-    assert fake.command_names() == []
+    # Only the read-only existence probe: nothing that could change Trash.
+    assert fake.command_names() == ["FETCH"]
+    assert all(call[2] is True for call in fake.calls if call[0] == "select")
 
 
 def test_read_fetch_is_bounded():
