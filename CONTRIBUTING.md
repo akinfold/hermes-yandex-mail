@@ -155,10 +155,11 @@ this):
 - `hermes_yandex_mail/__init__.py`
 - `hermes_yandex_mail/plugin.yaml`
 
-Then tag:
+Then create an annotated tag — the version, then a sentence or two on what
+changed — and push it:
 
 ```bash
-git tag vX.Y.Z && git push origin vX.Y.Z
+git tag -a vX.Y.Z -m "X.Y.Z" -m "What changed." && git push origin vX.Y.Z
 ```
 
 The publish workflow builds artifacts, runs the install check on exactly those
