@@ -11,6 +11,8 @@ Where the tests depart from the README text, and why:
 
 * the Git install adds ``--ref`` with the commit under test, because the README
   command installs whatever the default branch holds at the time;
+* the pinned upgrade starts from the commit of the latest release of this
+  plugin, ``INSTALL_PREV_REF``, and moves to the commit under test;
 * the PyPI install names the wheel about to be published instead of the
   project, so it cannot pick up the release already on PyPI;
 * the drop-in archive is the one about to be attached to the release, and its
@@ -20,22 +22,26 @@ Where the tests depart from the README text, and why:
 
 The PyPI route applies only to a Hermes in the older layout (its virtualenv in
 ``~/.hermes/hermes-agent/venv``), the only one README.md gives a PyPI command
-for. On Hermes ``main``, which pm builds, it is skipped. On the latest release it
-must run: once a release ships the pm layout, the test fails there rather than
-skipping, because README.md then needs changing.
+for. It runs wherever the installed Hermes has that layout, and is skipped where
+pm built it. The ``legacy`` channel, Hermes v2026.9.24, must give the older
+layout: there the test fails rather than skips, because the setup is broken.
 
 Each test changes the Hermes it runs against, then puts back what it changed:
 the plugin directories, ``config.yaml``, ``.env``, and a package installed from
 PyPI. They still install into a real ``~/.hermes``, so they refuse to run unless
 ``INSTALL_CHECK_DISPOSABLE_HOME=1`` says that Hermes is a throwaway one.
 
-Deselected by default. The ``Install check`` workflow runs them before every
-release, against the latest Hermes release and against Hermes ``main``. To run
-them yourself, do it in a container or VM with Hermes installed by its
-installer, after building the artifacts the way ``release-build.yml`` does::
+Deselected by default. The ``Install check`` workflow runs them on every pull
+request, every week, and before every release, against Hermes v2026.9.24 (the
+``legacy`` channel), the latest Hermes release and Hermes ``main``. To run them
+yourself, do it in a disposable container or VM with Hermes installed by its
+installer, after building the artifacts the way ``release-build.yml`` does and
+pushing the commit under test, which Hermes clones from GitHub::
 
-    INSTALL_CHECK_DISPOSABLE_HOME=1 INSTALL_DIST=dist \\
-    INSTALL_REF="$(git rev-parse HEAD)" python -m pytest -m install
+    INSTALL_CHECK_DISPOSABLE_HOME=1 INSTALL_CHECK_CHANNEL=main INSTALL_DIST=dist \\
+    INSTALL_REF="$(git rev-parse HEAD)" \\
+    INSTALL_PREV_REF="$(git rev-parse "$(git describe --tags --abbrev=0)^{commit}")" \\
+    python -m pytest -m install
 """
 
 from __future__ import annotations
@@ -79,6 +85,8 @@ DEFAULT_TOOLS = {
 GIT_INSTALL = "hermes plugins install akinfold/hermes-yandex-mail/hermes_yandex_mail --enable"
 GIT_UPDATE = "hermes plugins update yandex_mail"
 GIT_UPGRADE = GIT_INSTALL + " --force"
+#: Moves an install pinned with --ref; ``<commit>`` is a full 40-character SHA.
+GIT_REPIN = GIT_UPGRADE + " --ref <commit>"
 #: For a Hermes in the older layout only; see README.md, Option B.
 PYPI_INSTALL = (
     "~/.hermes/bin/uv pip install --python ~/.hermes/hermes-agent/venv/bin/python"
@@ -266,12 +274,19 @@ def _assert_loaded(home: Home, *, source: str, version: str | None = VERSION) ->
     assert set(mine) == DEFAULT_TOOLS, sorted(report["tools"])
 
 
+def _assert_pinned(home: Home, commit: str) -> None:
+    """``hermes plugins list`` shows the install pinned to *commit*, as ``git pinned@<sha8>``."""
+    pin = f"git pinned@{commit.lower()[:8]}"
+    assert [row["source"] for row in home.listed()] == [pin], home.listed()
+
+
 def test_readme_gives_the_commands_under_test() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     for command in (
         GIT_INSTALL,
         GIT_UPDATE,
         GIT_UPGRADE,
+        GIT_REPIN,
         PYPI_INSTALL,
         DROPIN_INSTALL,
         DROPIN_UPGRADE,
@@ -305,6 +320,45 @@ def test_git_install_asks_for_credentials_loads_and_upgrades(home: Home) -> None
 
 
 @install
+def test_git_install_pinned_with_ref_moves_only_with_a_new_ref(home: Home) -> None:
+    """README.md: ``--force`` alone keeps a pinned install on its commit; ``--ref`` moves it.
+
+    The install starts pinned to the latest release of this plugin and moves to
+    the commit under test. With no earlier commit to start from, it starts on the
+    commit under test, and the move is skipped.
+    """
+    ref = _required("INSTALL_REF")
+    previous = os.environ.get("INSTALL_PREV_REF", "")
+    start = previous if previous and previous != ref else ref
+    answers = "".join(PROMPT_ANSWERS[name] + "\n" for name in REQUIRED_ENV)
+    home.run(f"{GIT_INSTALL} --ref {start}", answers=answers)
+    _assert_pinned(home, start)
+    _assert_loaded(home, source="user", version=None)
+
+    out = _flat(home.run(GIT_UPDATE, check=False))
+    assert "is pinned" in out, f"`{GIT_UPDATE}` did not refuse a pinned install:\n{out}"
+    _assert_pinned(home, start)
+
+    # The trap README.md warns about: the plain upgrade installs the pinned commit again.
+    _make_stale(home)
+    home.run(GIT_UPGRADE)
+    _assert_pinned(home, start)
+    [plugin] = [plugin for plugin in home.probe()["plugins"] if plugin["name"] == PLUGIN]
+    assert plugin["version"] != "0.0.0", f"`{GIT_UPGRADE}` replaced nothing: {plugin}"
+
+    if start == ref:
+        pytest.skip(
+            "INSTALL_PREV_REF is unset or is the commit under test, so there is no earlier "
+            "commit to move the pin from; checked only that --force keeps the pin"
+        )
+    _make_stale(home)
+    home.run(GIT_REPIN.replace("<commit>", ref))
+    assert home.credentials() == PROMPT_ANSWERS
+    _assert_pinned(home, ref)
+    _assert_loaded(home, source="user")
+
+
+@install
 def test_git_install_updates_with_hermes_plugins_update(home: Home) -> None:
     """README.md's usual upgrade for Option A: Hermes' own ``plugins update``.
 
@@ -324,10 +378,11 @@ def test_git_install_updates_with_hermes_plugins_update(home: Home) -> None:
 @install
 def test_pypi_install_loads(home: Home) -> None:
     if is_pm_install(home.hermes_home):
-        if os.environ.get("INSTALL_CHECK_CHANNEL") == "release":
+        if os.environ.get("INSTALL_CHECK_CHANNEL") == "legacy":
             pytest.fail(
-                "the latest Hermes release runs from pm-built environments: README.md's "
-                "Option B command no longer applies to it, so change README.md and this test"
+                "the legacy channel installs Hermes v2026.9.24, whose installer builds the "
+                "older layout, yet this Hermes runs from pm-built environments: the Hermes "
+                "setup is broken, and Option B goes unchecked"
             )
         pytest.skip(
             "this Hermes runs from environments its package manager builds; README.md gives "
