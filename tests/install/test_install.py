@@ -12,7 +12,9 @@ Where the tests depart from the README text, and why:
 * the Git install adds ``--ref`` with the commit under test, because the README
   command installs whatever the default branch holds at the time;
 * the pinned upgrade starts from the commit of the latest release of this
-  plugin, ``INSTALL_PREV_REF``, and moves to the commit under test;
+  plugin, ``INSTALL_PREV_REF``, and moves to the commit under test. That
+  release is only the starting point: if it no longer installs on this Hermes,
+  the test skips rather than fails, or no fix for it could pass and be released;
 * the PyPI install names the wheel about to be published instead of the
   project, so it cannot pick up the release already on PyPI;
 * the drop-in archive is the one about to be attached to the release, and its
@@ -141,10 +143,10 @@ class Home:
     def hermes_home(self) -> Path:
         return self.path / ".hermes"
 
-    def run(
-        self, command: str, *, answers: str = "", check: bool = True, cwd: Path | None = None
-    ) -> str:
-        """Run a shell command as the user would; fail on a non-zero exit if *check*."""
+    def attempt(
+        self, command: str, *, answers: str = "", cwd: Path | None = None
+    ) -> tuple[int, str]:
+        """Run a shell command as the user would; return its exit status and output."""
         result = subprocess.run(
             ["bash", "-c", command],
             input=answers,
@@ -156,11 +158,16 @@ class Home:
             timeout=600,
             check=False,
         )
+        return result.returncode, result.stdout
+
+    def run(
+        self, command: str, *, answers: str = "", check: bool = True, cwd: Path | None = None
+    ) -> str:
+        """Run a shell command as the user would; fail on a non-zero exit if *check*."""
+        status, out = self.attempt(command, answers=answers, cwd=cwd)
         if check:
-            assert result.returncode == 0, (
-                f"`{command}` exited {result.returncode}:\n{result.stdout}"
-            )
-        return result.stdout
+            assert status == 0, f"`{command}` exited {status}:\n{out}"
+        return out
 
     def listed(self) -> list[dict]:
         """Rows for this plugin in ``hermes plugins list``."""
@@ -293,7 +300,11 @@ def test_readme_gives_the_commands_under_test() -> None:
         ENABLE,
         ADD_CREDENTIALS,
     ):
-        assert command in readme, f"README.md no longer says:\n{command}"
+        # Whole lines: GIT_INSTALL begins GIT_UPGRADE, which begins GIT_REPIN, so
+        # a plain substring would survive the shorter command's removal.
+        assert re.search(rf"(?m)^{re.escape(command)}$", readme), (
+            f"README.md no longer says, on lines of its own:\n{command}"
+        )
     assert f"~/.hermes/plugins/{PLUGIN}/plugin.yaml" in readme
 
 
@@ -326,14 +337,27 @@ def test_git_install_pinned_with_ref_moves_only_with_a_new_ref(home: Home) -> No
     The install starts pinned to the latest release of this plugin and moves to
     the commit under test. With no earlier commit to start from, it starts on the
     commit under test, and the move is skipped.
+
+    The latest release is setup here, not under test: when Hermes has changed so
+    that its install exits non-zero, the test skips. Failing would block every
+    fix, and the release of one, since publishing waits for this check. Nor does
+    the test check that this release loads; only the commit under test has to.
     """
     ref = _required("INSTALL_REF")
     previous = os.environ.get("INSTALL_PREV_REF", "")
     start = previous if previous and previous != ref else ref
     answers = "".join(PROMPT_ANSWERS[name] + "\n" for name in REQUIRED_ENV)
-    home.run(f"{GIT_INSTALL} --ref {start}", answers=answers)
+    command = f"{GIT_INSTALL} --ref {start}"
+    if start == ref:
+        home.run(command, answers=answers)
+    else:
+        status, out = home.attempt(command, answers=answers)
+        if status != 0:
+            pytest.skip(
+                f"the latest release, {start[:8]}, no longer installs on this Hermes "
+                f"(`{command}` exited {status}), so the pin move is not checked:\n{out}"
+            )
     _assert_pinned(home, start)
-    _assert_loaded(home, source="user", version=None)
 
     out = _flat(home.run(GIT_UPDATE, check=False))
     assert "is pinned" in out, f"`{GIT_UPDATE}` did not refuse a pinned install:\n{out}"
