@@ -121,7 +121,9 @@ disposable container or VM, never where you use Hermes: for example an
 installer of the channel you want — saved to a file and run with
 `--non-interactive --skip-setup --skip-browser --skip-computer-use`, plus
 `--branch` and the tag for a release (`v2026.9.24` for `legacy`) — and the
-commit under test pushed, since Hermes clones it from GitHub. The docstring of
+commit under test pushed, since Hermes clones it from GitHub. The v2026.9.24
+installer also needs a C++ compiler (`build-essential` on Ubuntu), which GitHub
+runners already have. The docstring of
 `tests/install/test_install.py` lists the variables to set. Remove the container
 afterwards.
 

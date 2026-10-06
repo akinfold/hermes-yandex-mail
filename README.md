@@ -37,8 +37,9 @@ your real mailbox, over IMAP, with no third-party service in the middle.
 - 🔑 **App password, not your account password** — scoped to mail, revocable in
   one click.
 
-Checked before every release against the latest Hermes release and Hermes `main`,
-each installed by its official installer; Python **3.11–3.14**.
+Checked on every pull request, weekly, and before every release against Hermes
+v2026.9.24, the latest Hermes release and Hermes `main`, each installed by its
+official installer; Python **3.11–3.14**.
 
 ## Quick start
 
