@@ -1,4 +1,6 @@
-# hermes-yandex-mail
+![Yandex Mail for Hermes Agent](https://raw.githubusercontent.com/akinfold/hermes-yandex-mail/main/docs/banner.png)
+
+# Yandex Mail for Hermes Agent
 
 [![PyPI version](https://img.shields.io/pypi/v/hermes-yandex-mail.svg)](https://pypi.org/project/hermes-yandex-mail/)
 [![CI](https://github.com/akinfold/hermes-yandex-mail/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/akinfold/hermes-yandex-mail/actions/workflows/ci.yml)
@@ -7,6 +9,8 @@
 [![CodeFactor](https://www.codefactor.io/repository/github/akinfold/hermes-yandex-mail/badge)](https://www.codefactor.io/repository/github/akinfold/hermes-yandex-mail)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+[Quick start](#quick-start) · [Features](#the-tools) · [Configuration](#configuration) · [Installation](#installing-the-plugin-into-hermes) · [Security](#security)
 
 **Let your [Hermes Agent](https://hermes-agent.nousresearch.com) work through your
 Yandex inbox.** *"What came in overnight?"* — *"Read me the one from the bank."* —
