@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import errno
 import imaplib
 import ssl
+from unittest.mock import Mock
 
 import pytest
 
+import hermes_yandex_mail.imap as imap_module
 from hermes_yandex_mail.imap import (
     _SPECIAL_NAMES,
     DEFAULT_TIMEOUT,
@@ -71,6 +74,166 @@ def test_message_summary_flag_properties():
 # -- connection -------------------------------------------------------------
 
 
+@pytest.fixture
+def no_connection_backoff(monkeypatch):
+    sleep = Mock()
+    monkeypatch.setattr(imap_module.time, "sleep", sleep)
+    return sleep
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ConnectionResetError("connection reset by peer"),
+        TimeoutError("timed out"),
+        OSError(errno.ENETUNREACH, "Network is unreachable"),
+        imaplib.IMAP4.abort("command: CAPABILITY => problems with connection"),
+        imaplib.IMAP4.abort("command: CAPABILITY => socket error: EOF"),
+    ],
+)
+def test_constructor_transport_failure_recovers_before_operation(failure, no_connection_backoff):
+    fake = FakeIMAP()
+    factory = Mock(side_effect=[failure, fake])
+    with YandexIMAPClient("me@yandex.ru", "x", connection_factory=factory) as client:
+        client.list_folders()
+    assert factory.call_count == 2
+    assert [call[0] for call in fake.calls] == ["login", "list", "logout"]
+    no_connection_backoff.assert_called_once_with(1.0)
+
+
+@pytest.mark.parametrize("stage", ["constructor", "login"])
+def test_connection_transport_recovery_is_bounded_and_preserves_final_cause(
+    stage, no_connection_backoff
+):
+    failures = [ConnectionResetError(f"failure {i}") for i in range(3)]
+    fakes = []
+    for failure in failures:
+        fake = FakeIMAP()
+        fake.login = Mock(side_effect=failure)
+        fakes.append(fake)
+    factory = Mock(side_effect=failures if stage == "constructor" else fakes)
+    client = YandexIMAPClient("me@yandex.ru", "x", connection_factory=factory)
+    with pytest.raises(MailError) as caught:
+        client.connect()
+    assert caught.value.__cause__ is failures[-1]
+    assert factory.call_count == 3
+    assert no_connection_backoff.call_count == 2
+    assert client._conn is None
+    if stage == "login":
+        assert all(fake.logged_out for fake in fakes)
+
+
+def test_login_failure_shuts_down_socket_if_logout_also_fails(no_connection_backoff):
+    failure = ConnectionResetError("reset during login")
+    failed, ready = FakeIMAP(), FakeIMAP()
+    failed.login = Mock(side_effect=failure)
+    failed.logout = Mock(side_effect=imaplib.IMAP4.abort("socket error: EOF"))
+    failed.shutdown = Mock()
+
+    def create(host, port):
+        if failed.login.call_count == 0:
+            return failed
+        failed.shutdown.assert_called_once()
+        return ready
+
+    client = YandexIMAPClient("me@yandex.ru", "x", connection_factory=create)
+    with client:
+        assert client.connect() is ready
+    failed.shutdown.assert_called_once()
+
+
+def test_invalid_password_fails_before_any_connection_attempt(no_connection_backoff):
+    factory = Mock()
+    client = YandexIMAPClient("me@yandex.ru", "пароль", connection_factory=factory)
+    with pytest.raises(MailError, match="ASCII"):
+        client.connect()
+    factory.assert_not_called()
+    no_connection_backoff.assert_not_called()
+
+
+def test_login_transport_failure_closes_before_recovery(no_connection_backoff):
+    failed, ready = FakeIMAP(), FakeIMAP()
+    failed.login = Mock(side_effect=imaplib.IMAP4.abort("problems with connection"))
+
+    def create(host, port):
+        if not failed.logged_out:
+            return failed
+        return ready
+
+    factory = Mock(side_effect=create)
+    with YandexIMAPClient("me@yandex.ru", "x", connection_factory=factory) as client:
+        assert client.connect() is ready
+    assert failed.logged_out and ready.logged_out
+    assert factory.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ssl.SSLCertVerificationError("certificate verify failed"),
+        ssl.SSLError("unsupported protocol"),
+        imaplib.IMAP4.error("command: CAPABILITY => problems with connection"),
+        imaplib.IMAP4.abort("malformed server response"),
+        OSError(errno.EACCES, "Permission denied"),
+        ValueError("invalid configuration"),
+    ],
+)
+def test_constructor_nontransport_failure_is_not_retried(failure, no_connection_backoff):
+    factory = Mock(side_effect=failure)
+    client = YandexIMAPClient("me@yandex.ru", "x", connection_factory=factory)
+    with pytest.raises((MailError, ValueError)):
+        client.connect()
+    factory.assert_called_once()
+    no_connection_backoff.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        imaplib.IMAP4.error("invalid credentials"),
+        imaplib.IMAP4.abort("malformed server response"),
+        ssl.SSLCertVerificationError("certificate verify failed"),
+    ],
+)
+def test_login_nontransport_failure_closes_without_retry(failure, no_connection_backoff):
+    fake = FakeIMAP()
+    fake.login = Mock(side_effect=failure)
+    factory = Mock(return_value=fake)
+    client = YandexIMAPClient("me@yandex.ru", "x", connection_factory=factory)
+    with pytest.raises(MailError) as caught:
+        client.connect()
+    assert caught.value.__cause__ is failure
+    factory.assert_called_once()
+    assert fake.logged_out
+    no_connection_backoff.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "command,operation",
+    [
+        ("APPEND", lambda c: c.append("INBOX", b"sample")),
+        ("STORE", lambda c: c.store_flags("INBOX", ["8"], add=["\\Seen"])),
+        ("MOVE", lambda c: c.move("INBOX", ["8"], "Trash")),
+        ("MOVE", lambda c: c.delete("INBOX", ["8"], permanent=False)),
+        ("LIST", lambda c: c.list_folders()),
+    ],
+)
+def test_connection_recovery_never_replays_caller_operation(
+    command, operation, no_connection_backoff
+):
+    fake = FakeIMAP()
+    fake.responses[command] = imaplib.IMAP4.abort("command: UID => problems with connection")
+    factory = Mock(side_effect=[ConnectionResetError("reset"), fake])
+    with (
+        YandexIMAPClient("me@yandex.ru", "x", connection_factory=factory) as client,
+        pytest.raises(MailError),
+    ):
+        operation(client)
+    assert factory.call_count == 2
+    attempted = [call[1] if call[0] == "uid" else call[0].upper() for call in fake.calls]
+    assert attempted.count(command) == 1
+
+
 def test_connect_is_cached_and_logs_out_once(fake_imap):
     with make_client(fake_imap) as client:
         assert client.connect() is client.connect()
@@ -97,7 +260,9 @@ def test_unreachable_server_becomes_a_mail_error():
 
 
 @pytest.mark.parametrize("error_type", [imaplib.IMAP4.abort, imaplib.IMAP4.error])
-def test_a_protocol_failure_during_connection_becomes_a_mail_error(error_type):
+def test_a_protocol_failure_during_connection_becomes_a_mail_error(
+    error_type, no_connection_backoff
+):
     failure = error_type("command: CAPABILITY => problems with connection")
 
     def explode(host, port):
@@ -118,7 +283,7 @@ def test_a_protocol_failure_during_connection_becomes_a_mail_error(error_type):
         (imaplib.IMAP4.error("invalid credentials"), "Authentication failed"),
     ],
 )
-def test_a_failed_login_closes_the_uncached_connection(failure, expected):
+def test_a_failed_login_closes_the_uncached_connection(failure, expected, no_connection_backoff):
     class Rude(FakeIMAP):
         def login(self, user, password):
             raise failure

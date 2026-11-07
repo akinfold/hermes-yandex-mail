@@ -628,8 +628,10 @@ so the plugin's own fence refuses anything else before a socket opens, and the
 test process asserts the same thing again before each call. Use a dedicated test
 mailbox regardless.
 
-Read-only handlers and initial client connections make up to three attempts after
-transient transport errors. Connection recovery finishes before any test write.
+The IMAP client makes up to three connection attempts after transient transport
+errors, before any caller operation runs. The live suite also makes up to three
+attempts for read-only handler transport failures after connection establishment;
+it does not repeat an exhausted connection retry sequence.
 Cleanup reconnects and rescans after a transport failure, requires two complete
 empty scans, and fails if it cannot verify removal. Sends and other test writes
 are not retried.

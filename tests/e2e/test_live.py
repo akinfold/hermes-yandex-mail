@@ -19,7 +19,7 @@ import re
 import stat
 import time
 import uuid
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from email.message import EmailMessage
 from email.utils import make_msgid
 from pathlib import Path
@@ -67,27 +67,17 @@ def _transport_failure(error: object) -> bool:
 
 @contextmanager
 def _connected_client():
-    """Retry connection establishment before handing the client to its caller."""
-    for attempt in range(_TRANSPORT_ATTEMPTS):
-        stack = ExitStack()
-        try:
-            live = stack.enter_context(config.build_client())
-            # The client is lazy: __enter__ alone does not open its connection.
-            live.connect()
-        except BaseException as exc:
-            stack.close()
-            if (
-                not isinstance(exc, (MailError, OSError))
-                or not _transport_failure(exc)
-                or attempt + 1 >= _TRANSPORT_ATTEMPTS
-            ):
-                raise
-            time.sleep(_TRANSPORT_POLL)
-        else:
-            break
-    # The caller's body is outside the retry scope, including every write.
-    with stack:
+    """Finish production connection recovery before entering the caller's body."""
+    with config.build_client() as live:
+        live.connect()
         yield live
+
+
+def _retryable_operation_failure(error: object) -> bool:
+    # Establishment already exhausted its production retry budget.
+    return not str(error).startswith(("Cannot reach ", "Login failed:")) and _transport_failure(
+        error
+    )
 
 
 def _read_only_handler(name: str, args: dict) -> dict:
@@ -99,7 +89,7 @@ def _read_only_handler(name: str, args: dict) -> dict:
     }[name]
     for attempt in range(_TRANSPORT_ATTEMPTS):
         payload = json.loads(handler(args))
-        if not _transport_failure(payload.get("error", "")):
+        if not _retryable_operation_failure(payload.get("error", "")):
             return payload
         if attempt + 1 < _TRANSPORT_ATTEMPTS:
             time.sleep(_TRANSPORT_POLL)
@@ -225,7 +215,7 @@ def _purge_everywhere(marker: str) -> None:
             quiet = 0
             failures += 1
             last_failure = str(exc)
-            if not _transport_failure(exc) or failures >= _TRANSPORT_ATTEMPTS:
+            if not _retryable_operation_failure(exc) or failures >= _TRANSPORT_ATTEMPTS:
                 raise RuntimeError(
                     f"live cleanup could not verify removal of {marker}: {exc}"
                 ) from exc

@@ -30,7 +30,7 @@ def no_wait(monkeypatch):
 @pytest.mark.parametrize("name", ["read", "search", "list_folders"])
 def test_read_only_transport_retry_is_bounded(monkeypatch, name):
     handler = Mock(
-        return_value=json.dumps({"error": "Cannot reach host: [Errno 101] Network is unreachable"})
+        return_value=json.dumps({"error": "SEARCH failed: [Errno 101] Network is unreachable"})
     )
     monkeypatch.setattr(live.tool, f"handle_{name}", handler)
     result = live._read_only_handler(name, {})
@@ -112,12 +112,11 @@ def _client(hits=(), *, search_error=None, delete_error=None):
     return client
 
 
-def test_cleanup_reconnects_after_constructor_transport_failure(monkeypatch):
-    empty = _client()
-    built = _clients(monkeypatch, [MailError("CAPABILITY failed: socket error: EOF"), empty, empty])
-    live._purge_everywhere("marker")
-    assert built.call_count == 3
-    assert empty.search.call_count == 4
+def test_cleanup_does_not_repeat_exhausted_connection_attempts(monkeypatch):
+    built = _clients(monkeypatch, [MailError("Cannot reach host: socket error: EOF")])
+    with pytest.raises(RuntimeError, match="could not verify removal"):
+        live._purge_everywhere("marker")
+    assert built.call_count == 1
 
 
 def test_incomplete_scan_resets_quiet_counter(monkeypatch):
@@ -200,69 +199,41 @@ def test_live_workflow_serializes_all_refs_without_canceling_cleanup():
     }
 
 
-def test_connection_entry_transport_failure_recovers_before_body(monkeypatch):
-    ready = _client()
-    built = _clients(
-        monkeypatch, [MailError("command: CAPABILITY => problems with connection"), ready]
-    )
-    with live._connected_client() as client:
-        client.append("INBOX", b"sample")
-    assert built.call_count == 2
-    ready.connect.assert_called_once()
-    ready.append.assert_called_once_with("INBOX", b"sample")
+def test_harness_preconnects_once_before_the_caller_body(monkeypatch):
+    client = _client()
+    built = _clients(monkeypatch, [client])
+    with live._connected_client() as connected:
+        connected.connect.assert_called_once()
+        connected.append("INBOX", b"sample")
+    assert built.call_count == 1
+    client.append.assert_called_once()
 
 
-def test_lazy_connection_transport_failure_closes_before_retry(monkeypatch):
-    failed, ready = _client(), _client()
-    failed.connect.side_effect = MailError("command: CAPABILITY => problems with connection")
-    closed = []
-    clients = iter([failed, ready])
+def test_harness_closes_after_exhausted_production_connection_recovery(monkeypatch):
+    client = _client()
+    client.connect.side_effect = MailError("Cannot reach host: socket error: EOF")
+    closed = Mock()
 
     @contextmanager
     def build():
-        client = next(clients)
         try:
             yield client
         finally:
-            closed.append(client)
+            closed()
 
     monkeypatch.setattr(live.config, "build_client", build)
-    with live._connected_client() as client:
-        assert client is ready
-        assert closed == [failed]
-        client.append("INBOX", b"sample")
-    assert closed == [failed, ready]
-    failed.append.assert_not_called()
-    ready.append.assert_called_once()
-
-
-@pytest.mark.parametrize(
-    "error",
-    [
-        MailError("command: CAPABILITY => problems with connection"),
-        MailError("network is unreachable"),
-    ],
-)
-def test_initial_connection_recovery_is_bounded(monkeypatch, error):
-    built = _clients(monkeypatch, [error, error, error])
     with pytest.raises(MailError), live._connected_client():
-        pytest.fail("an unconnected client reached the test body")
-    assert built.call_count == 3
+        pytest.fail("an unconnected client reached the caller body")
+    client.connect.assert_called_once()
+    closed.assert_called_once()
 
 
-@pytest.mark.parametrize(
-    "error",
-    [
-        MailError("Authentication failed: invalid credentials"),
-        MailError("Cannot reach host: CERTIFICATE_VERIFY_FAILED"),
-        ValueError("invalid configuration"),
-    ],
-)
-def test_initial_connection_nontransport_failure_is_not_retried(monkeypatch, error):
-    built = _clients(monkeypatch, [error])
-    with pytest.raises(type(error)), live._connected_client():
-        pytest.fail("an unconnected client reached the test body")
-    assert built.call_count == 1
+@pytest.mark.parametrize("prefix", ["Cannot reach host:", "Login failed:"])
+def test_handlers_do_not_multiply_exhausted_connection_attempts(monkeypatch, prefix):
+    handler = Mock(return_value=json.dumps({"error": f"{prefix} socket error: EOF"}))
+    monkeypatch.setattr(live.tool, "handle_read", handler)
+    assert "error" in live._read_only_handler("read", {})
+    handler.assert_called_once()
 
 
 @pytest.mark.parametrize("operation", ["append", "send", "store_flags", "move", "delete"])
@@ -276,12 +247,10 @@ def test_connection_recovery_never_replays_caller_write(monkeypatch, operation):
     getattr(client, operation).assert_called_once_with("write")
 
 
-def test_samples_retry_connection_without_replaying_an_append(monkeypatch):
+def test_samples_never_replay_an_append(monkeypatch):
     client = _client()
     client.append.side_effect = ["8", MailError("command: APPEND => problems with connection")]
-    built = _clients(
-        monkeypatch, [MailError("command: CAPABILITY => problems with connection"), client]
-    )
+    built = _clients(monkeypatch, [client])
     monkeypatch.setattr(
         live, "_sample_messages", lambda *_: {"first": b"first", "second": b"second"}
     )
@@ -290,7 +259,8 @@ def test_samples_retry_connection_without_replaying_an_append(monkeypatch):
     fixture = live.samples.__wrapped__("test@example.invalid")
     with pytest.raises(MailError):
         next(fixture)
-    assert built.call_count == 2
+    assert built.call_count == 1
+    client.connect.assert_called_once()
     assert client.append.call_count == 2
     purge.assert_called_once()
 
