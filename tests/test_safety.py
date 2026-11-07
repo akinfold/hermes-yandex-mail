@@ -23,7 +23,7 @@ def test_search_rejects_control_characters_at_the_wire_sink(field, control):
 def _registered_handlers(monkeypatch, actions: dict[str, str]):
     monkeypatch.setattr(
         config,
-        "get_provider_env",
+        "env_value",
         lambda key: actions["value"] if key == config.ENV_ACTIONS else "",
     )
     handlers = {}
@@ -156,3 +156,50 @@ def test_read_output_has_a_hard_character_limit(monkeypatch):
     ]
     assert len(message["body"]) == 100000
     assert message["truncated"] is True
+
+
+@pytest.mark.parametrize("action", config.ACTIONS)
+def test_profile_scope_errors_never_escape_registered_handlers(monkeypatch, action):
+    actions = {"value": "all,send_message,save_attachment"}
+    handlers = _registered_handlers(monkeypatch, actions)
+
+    def unscoped(_name):
+        raise RuntimeError("Profile scope is unavailable")
+
+    monkeypatch.setattr(config, "env_value", unscoped)
+    built = []
+    monkeypatch.setattr(tool, "build_client", lambda: built.append("imap"))
+    monkeypatch.setattr(tool, "build_smtp_client", lambda: built.append("smtp"))
+    result = json.loads(handlers[f"yandex_mail_{action}"]({}))
+    assert "Profile scope is unavailable" in result["error"]
+    assert result["error"].endswith("Nothing was sent.") == (action == "send_message")
+    assert built == []
+    assert config.credentials_present() is False
+
+
+def test_registration_fails_before_exposing_tools_without_profile_scope(monkeypatch):
+    def unscoped(_name):
+        raise RuntimeError("Profile scope is unavailable")
+
+    monkeypatch.setattr(config, "env_value", unscoped)
+    registered = []
+
+    class Context:
+        def register_tool(self, **kwargs):
+            registered.append(kwargs)
+
+    with pytest.raises(RuntimeError, match="Profile scope"):
+        register(Context())
+    assert registered == []
+
+
+@pytest.mark.parametrize("action", config.ACTIONS)
+def test_guard_returns_json_when_an_unexpected_handler_error_occurs(monkeypatch, action):
+    monkeypatch.setattr(config, "env_value", lambda _name: "all,send_message,save_attachment")
+
+    def broken(_args):
+        raise RuntimeError("Handler failed")
+
+    result = json.loads(tool.with_action_guard(action, broken)({}))
+    assert "Handler failed" in result["error"]
+    assert result["error"].endswith("Nothing was sent.") == (action == "send_message")

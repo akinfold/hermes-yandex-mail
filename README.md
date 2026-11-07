@@ -30,10 +30,10 @@ your real mailbox, over IMAP, with no third-party service in the middle.
 - 🔒 **You choose what it may touch** — restrict it to specific folders, and to
   specific actions (`read`, `read,write`, …). A disallowed action is not in the
   toolset at all, so the model cannot be talked into calling it.
-- 🛟 **Nothing is lost, and nothing is over-claimed** — a copy exists before an
-  original is removed, deletion means Trash unless you insist otherwise, an
-  expunge only ever names the UIDs it was given, and a UID that no longer
-  exists is refused instead of reported as done.
+- 🛟 **Moves preserve a copy before removing the original** — deletion moves to
+  Trash by default, but `permanent=true` irreversibly removes the requested
+  messages. Expunge names only the requested UIDs, and a missing UID is
+  refused instead of reported as done.
 - 👓 **Reading does not mark as read** — the agent peeks; `\Seen` changes only
   when you ask.
 - 🪶 **No runtime dependencies** — IMAP and MIME parsing come from Python's own
@@ -144,17 +144,20 @@ error rather than buffered.
 |---|---|---|---|
 | `YANDEX_MAIL_LOGIN` | yes | — | Your full Yandex address, e.g. `you@yandex.ru`. Sending needs the complete address: it becomes `From` and the envelope sender, and `yandex_mail_send_message` refuses a bare login. |
 | `YANDEX_MAIL_APP_PASSWORD` | yes | — | App password with the Mail scope — an account password will not work. |
-| `YANDEX_MAIL_IMAP_HOST` | no | `imap.yandex.ru` | Override for a Yandex 360 domain or for testing. |
+| `YANDEX_MAIL_IMAP_HOST` | no | `imap.yandex.ru` | TLS server hostname or IP address; overriding it sends your credentials to that server. No URL or port in this field. |
 | `YANDEX_MAIL_IMAP_PORT` | no | `993` | IMAP over TLS. |
 | `YANDEX_MAIL_FOLDERS` | no | *(all)* | Comma-separated allow-list of folders, spelled as `yandex_mail_list_folders` reports them; case is ignored, but role words and synonyms such as `sent` or `spam` are **not** expanded here, so on an account whose Sent folder carries a localised name, that localised name is the one to list. The first entry is the default folder. |
 | `YANDEX_MAIL_ACTIONS` | no | *(all but sending and saving attachments)* | Comma-separated allow-list of actions the agent may perform — see below. |
-| `YANDEX_MAIL_SMTP_HOST` | no | `smtp.yandex.ru` | Override for a Yandex 360 domain or for testing. |
+| `YANDEX_MAIL_SMTP_HOST` | no | `smtp.yandex.ru` | TLS server hostname or IP address; overriding it sends your credentials to that server. No URL or port in this field. |
 | `YANDEX_MAIL_SMTP_PORT` | no | `465` | SMTP over implicit TLS. |
 | `YANDEX_MAIL_SEND_TO` | no | *(any address)* | Comma-separated fence on who may be written to: full addresses, or `@domain` for a whole domain. A value that is set but names nothing usable — whitespace, or nothing after the `=` — refuses **every** recipient; only removing the variable removes the fence. |
 | `YANDEX_MAIL_ATTACHMENT_MAX_BYTES` | no | `104857600` (100 MiB) | The largest attachment `yandex_mail_save_attachment` will save, in bytes. A value that is not a positive whole number — `100MB`, say — refuses every save rather than falling back to the default. |
 
-Credentials are read from the environment first, then from `~/.hermes/.env`, so
-they work in gateway and subprocess runs. Secret values are never logged.
+Configuration and credentials use Hermes' current profile through its public
+secret API. An explicitly empty recipient fence stays empty when profiles
+change; another profile's values are never used as a fallback. Hermes loads
+the profile's `.env` file itself. Outside Hermes, only the process environment
+is read. Secret values are never logged.
 
 Dates are ISO 8601 (`2026-07-25`). Folder names may be in any language — the
 Cyrillic names Yandex gives Russian accounts (`Отправленные`, `Спам`) are encoded
@@ -314,11 +317,10 @@ Removing the variable is the only thing that removes the fence.
 > empty `YANDEX_MAIL_SEND_TO=` and you rely on sending, either delete the line
 > (no fence) or fill it in (a fence).
 >
-> What "set" means has a limit worth knowing. The plugin looks for the name in
-> the process environment and in `~/.hermes/.env`. A value that reaches it only
-> through Hermes' own configuration layer cannot be seen there, and if it
-> strips to nothing it still reads as no fence at all. Keep the fence in the
-> environment or in `~/.hermes/.env`.
+> From 0.4.3, this distinction also holds in routed gateway profiles. The
+> plugin uses the current profile's secret API for both presence and value.
+> If Hermes cannot resolve a profile, calls return an error; registration
+> refuses to expose tools whose permissions cannot be determined.
 
 **The rules the tool enforces, whatever it is asked to do:**
 
@@ -676,6 +678,63 @@ Part of a family of Yandex plugins for Hermes Agent:
 - [hermes-yandex-search-api](https://github.com/akinfold/hermes-yandex-search-api) — Yandex web search backend and generative, cited answers for Hermes (Yandex Search API).
 
 ## Security
+
+### Access and data flow
+
+The default tools can read mail, change flags, move messages and delete them.
+Deletion goes to Trash by default; `permanent=true` permanently removes the
+requested messages. Set `YANDEX_MAIL_ACTIONS=read` for read-only use. Folder
+restrictions and action permissions are checked again when a tool is called.
+
+`send_message` and `save_attachment` require explicit opt-in. Once enabled,
+sending does not ask for confirmation: an agent or scheduled job can send mail
+as you. Set `YANDEX_MAIL_SEND_TO` to limit recipients. Only the explicit `to`
+argument supplies recipients; sender addresses and reply headers do not grant
+permission to send to anyone.
+
+The plugin connects directly to `imap.yandex.ru:993` and, when sending is
+enabled, `smtp.yandex.ru:465`. Both use implicit TLS with certificate and
+hostname verification and a 30-second socket timeout. Host/port overrides
+change those destinations and send your login and app password to the selected
+TLS server. Syntax checks reject URLs and malformed hosts; they do not establish
+that a host belongs to Yandex. Use only servers you trust. There is no telemetry
+or intermediary mail service in this plugin.
+
+Message headers, body text and attachment metadata are returned to the agent
+and may reach its configured model provider. Email is untrusted input: HTML
+conversion is for readability, not a security boundary. Hidden text, misleading
+Unicode and instructions from a sender may remain in the result. Review an
+agent's requested actions before granting write access or scheduling mail jobs.
+
+### Saved attachments
+
+Saving writes only to Hermes' document cache for the active profile, not to an
+arbitrary caller-supplied destination. This is Hermes' incoming-document cache;
+`HERMES_WRITE_SAFE_ROOT`, which restricts file-edit tools, does not govern it.
+Other Hermes tools can read the saved files. The plugin prunes only its own
+cache files older than 24 hours when saving another attachment; Hermes may also
+prune this shared cache. It is temporary storage, not an archive.
+
+Saved names remove path components, shell metacharacters, control characters
+and Unicode line separators. Files use mode `0600`, an exclusive temporary name,
+a size cap and a checked inode before a successful result. Saving refuses a
+symlink cache, a cache owned by another user, group/world-writable cache
+permissions, or a filesystem without hard links. It requires POSIX directory
+operations, as available on Linux and macOS. Paths can still contain spaces;
+quote them when using shell commands. A failed path translation removes the
+saved file and returns an error.
+
+Hermes currently has no public equivalent of
+`tools.credential_files.to_agent_visible_cache_path`. The compatibility layer
+uses that private helper to translate paths for remote/sandbox tools. Real-Hermes
+install checks exercise it; a future host change may break attachment saving.
+If the helper is unavailable or raises, saving fails and removes the saved file.
+The helper may return the host path when it cannot find a backend mapping;
+remote attachment access then depends on Hermes' backend configuration.
+Reloading plugins in a gateway without an active profile can also fail closed;
+restart within the intended profile if Hermes cannot determine permissions.
+
+### Older TLS issue
 
 **0.1.0 and 0.2.0 connected without verifying the server's TLS certificate.**
 `imaplib.IMAP4_SSL` with no explicit `ssl_context` falls back to

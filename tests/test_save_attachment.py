@@ -115,24 +115,14 @@ def test_a_planted_link_at_the_temporary_name_is_not_written_through(tmp_path, m
     assert victim.read_bytes() == b"precious"
 
 
-def test_without_hard_links_the_file_is_renamed_into_place(tmp_path, monkeypatch):
-    def no_links(source, target):
+def test_without_hard_links_saving_fails_without_leaving_files(tmp_path, monkeypatch):
+    def no_links(*args, **kwargs):
         raise PermissionError("hard links are not supported here")
 
     monkeypatch.setattr(attachment.os, "link", no_links)
-    saved = save([b"data"], tmp_path, "a.bin", 100)
-    assert saved.path.read_bytes() == b"data"
-    assert _files(tmp_path) == [saved.path.name]
-
-
-def test_without_hard_links_an_existing_file_is_still_not_overwritten(tmp_path, monkeypatch):
-    monkeypatch.setattr(attachment.os, "link", lambda s, t: (_ for _ in ()).throw(OSError()))
-    monkeypatch.setattr(attachment.uuid, "uuid4", lambda: types.SimpleNamespace(hex="0" * 32))
-    existing = tmp_path / "yandex-mail_000000000000_a.bin"
-    existing.write_bytes(b"precious")
-    with pytest.raises(FileExistsError):
-        save([b"new"], tmp_path, "a.bin", 100)
-    assert existing.read_bytes() == b"precious"
+    with pytest.raises(PermissionError, match="hard links"):
+        save([b"data"], tmp_path, "a.bin", 100)
+    assert _files(tmp_path) == []
 
 
 def test_a_short_write_is_continued(tmp_path, monkeypatch):
@@ -214,8 +204,7 @@ def test_inside_hermes_its_own_resolution_is_used(monkeypatch):
 @pytest.fixture
 def env(monkeypatch):
     values: dict[str, str] = {}
-    monkeypatch.setattr(config, "get_provider_env", lambda name: values.get(name, "").strip())
-    monkeypatch.setattr(config, "provider_env_is_set", lambda name: name in values)
+    monkeypatch.setattr(config, "env_value", values.get)
     return values
 
 
@@ -355,9 +344,81 @@ def test_the_folder_allow_list_holds(monkeypatch):
 
 
 def test_a_read_only_deployment_cannot_save(mailbox, monkeypatch):
-    monkeypatch.setattr(config, "get_provider_env", lambda name: "read")
+    monkeypatch.setattr(config, "env_value", lambda name: "read")
     guarded = tool.with_action_guard("save_attachment", tool.handle_save_attachment)
     result = json.loads(guarded({"uid": "8", "folder": "INBOX", "part_id": "2"}))
     assert "not allowed" in result["error"]
     assert not mailbox.calls
     assert _files(_cache()) == []
+
+
+@pytest.mark.parametrize("mode", [0o777, 0o770, 0o722])
+def test_saving_refuses_a_cache_others_can_write(tmp_path, mode):
+    tmp_path.chmod(mode)
+    with pytest.raises(PermissionError, match="writable"):
+        save([b"private"], tmp_path, "a.bin", 100)
+    assert _files(tmp_path) == []
+
+
+def test_saving_refuses_a_symlink_cache(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(target, target_is_directory=True)
+    with pytest.raises(OSError):
+        save([b"private"], alias, "a.bin", 100)
+    assert _files(target) == []
+
+
+@pytest.mark.parametrize("symlink", [False, True])
+def test_replacing_the_temporary_file_cannot_publish_other_bytes(tmp_path, monkeypatch, symlink):
+    real_link = os.link
+    victim = tmp_path / "victim.txt"
+    victim.write_bytes(b"precious")
+
+    def replace_source(source, target, **kwargs):
+        (tmp_path / source).unlink()
+        if symlink:
+            (tmp_path / source).symlink_to(victim)
+        else:
+            (tmp_path / source).write_bytes(b"substitute")
+        real_link(source, target, **kwargs)
+
+    monkeypatch.setattr(attachment.os, "link", replace_source)
+    with pytest.raises(OSError, match="changed"):
+        save([b"private"], tmp_path, "a.bin", 100)
+    assert victim.read_bytes() == b"precious"
+    assert _files(tmp_path) == [victim.name]
+
+
+def test_replacing_the_cache_path_cannot_report_a_saved_file(tmp_path, monkeypatch):
+    directory = tmp_path / "documents"
+    directory.mkdir()
+    moved = tmp_path / "moved"
+    real_link = os.link
+
+    def replace_cache(source, target, **kwargs):
+        real_link(source, target, **kwargs)
+        directory.rename(moved)
+        directory.mkdir()
+
+    monkeypatch.setattr(attachment.os, "link", replace_cache)
+    with pytest.raises(OSError, match="changed"):
+        save([b"private"], directory, "a.bin", 100)
+    assert _files(moved) == []
+    assert _files(directory) == []
+
+
+def test_zero_length_os_write_fails_instead_of_hanging(tmp_path, monkeypatch):
+    monkeypatch.setattr(attachment.os, "write", lambda *args: 0)
+    with pytest.raises(OSError, match="no progress"):
+        save([b"private"], tmp_path, "a.bin", 100)
+    assert _files(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "name", ["$(touch marker).txt", "`id`.pdf", "a'b;c&d.txt", "a\u2028b\u2029.txt"]
+)
+def test_saved_names_cannot_contain_shell_or_line_separators(name):
+    result = safe_filename(name, "2")
+    assert not set("$`';&()\u2028\u2029") & set(result)

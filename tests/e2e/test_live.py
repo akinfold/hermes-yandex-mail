@@ -64,8 +64,8 @@ def _await_search(
 
 
 def _credentials() -> tuple[str, str]:
-    login = config.get_provider_env(config.ENV_LOGIN)
-    password = config.get_provider_env(config.ENV_PASSWORD)
+    login = config.env_value(config.ENV_LOGIN)
+    password = config.env_value(config.ENV_PASSWORD)
     if not login or not password:
         pytest.skip(f"{config.ENV_LOGIN} / {config.ENV_PASSWORD} are not set")
     return login, password

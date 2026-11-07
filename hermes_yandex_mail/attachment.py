@@ -23,10 +23,11 @@ import contextlib
 import hashlib
 import os
 import re
+import stat
 import time
 import unicodedata
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,10 +41,10 @@ _TEMPORARY = "." + PREFIX
 _NAME_BYTES = 180
 _EXTENSION_BYTES = 16
 #: Characters Windows does not allow in a name.
-_RESERVED = re.compile(r'[<>:"|?*]')
+_RESERVED = re.compile(r"[<>:\"|?*$`';&(){}!#~]")
 #: Control and formatting characters, the last including the bidirectional
 #: overrides that can make "exe.pdf" display as "fdp.exe".
-_INVISIBLE = frozenset({"Cc", "Cf", "Cs"})
+_INVISIBLE = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
 
 
 class AttachmentTooLarge(ValueError):
@@ -79,80 +80,103 @@ def safe_filename(name: str, part_id: str) -> str:
     return f"{stem}{suffix}" if stem else f"attachment-{part_id}.bin"
 
 
-def prune(directory: Path, max_age: float, now: float | None = None) -> int:
-    """Delete this plugin's files in ``directory`` older than ``max_age`` seconds.
+@contextlib.contextmanager
+def _cache_directory(directory: Path) -> Iterator[int]:
+    """Pin a directory writable only by its owner before touching cache files."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(directory, flags)
+    try:
+        status = os.fstat(descriptor)
+        if not stat.S_ISDIR(status.st_mode) or status.st_mode & 0o022:
+            raise PermissionError("The document cache must not be group- or world-writable.")
+        if hasattr(os, "getuid") and status.st_uid != os.getuid():
+            raise PermissionError("The document cache must belong to the current user.")
+        _check_identity(directory.lstat(), status)
+        yield descriptor
+    finally:
+        os.close(descriptor)
 
-    Only files carrying :data:`PREFIX` (or a temporary one left by a crash) are
-    touched, and only at the top level, which is where :func:`save` writes.
-    Returns how many were removed.
-    """
+
+def _check_identity(actual: os.stat_result, expected: os.stat_result) -> None:
+    if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+        raise OSError("The document cache or attachment changed while saving.")
+
+
+def prune(directory: Path, max_age: float, now: float | None = None) -> int:
+    """Remove only this plugin's old regular files from a trusted cache directory."""
     cutoff = (time.time() if now is None else now) - max_age
     removed = 0
     try:
-        entries = list(directory.iterdir())
+        with _cache_directory(directory) as cache:
+            for name in os.listdir(cache):
+                if not name.startswith((PREFIX, _TEMPORARY)):
+                    continue
+                with contextlib.suppress(OSError):
+                    status = os.stat(name, dir_fd=cache, follow_symlinks=False)
+                    if stat.S_ISREG(status.st_mode) and status.st_mtime < cutoff:
+                        os.unlink(name, dir_fd=cache)
+                        removed += 1
     except OSError:
         return 0
-    for entry in entries:
-        if not entry.name.startswith((PREFIX, _TEMPORARY)):
-            continue
-        with contextlib.suppress(OSError):
-            status = entry.lstat()
-            if entry.is_file() and not entry.is_symlink() and status.st_mtime < cutoff:
-                entry.unlink()
-                removed += 1
     return removed
 
 
 def save(chunks: Iterable[bytes], directory: Path, filename: str, max_bytes: int) -> SavedFile:
-    """Write ``chunks`` to a new file in ``directory`` named after ``filename``.
+    """Stream into a private file and publish it without replacing an existing name.
 
-    ``filename`` must already be safe (see :func:`safe_filename`). Raises
-    :class:`AttachmentTooLarge` as soon as more than ``max_bytes`` have arrived,
-    and leaves no file behind on that or any other failure.
+    ``filename`` must already be safe (see :func:`safe_filename`). Refuse unsafe
+    cache permissions and filesystems without hard-link support. Any failure
+    removes this call's temporary file and any name it published.
     """
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     token = uuid.uuid4().hex[:12]
-    temporary = directory / f"{_TEMPORARY}{token}.part"
-    final = directory / f"{PREFIX}{token}_{filename}"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-    digest, size = hashlib.sha256(), 0
-    descriptor = os.open(temporary, flags, 0o600)
-    try:
+    temporary = f"{_TEMPORARY}{token}.part"
+    final = f"{PREFIX}{token}_{filename}"
+    with _cache_directory(directory) as cache:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=cache)
         try:
-            for chunk in chunks:
-                size += len(chunk)
-                if size > max_bytes:
-                    raise AttachmentTooLarge(
-                        f"The attachment is larger than the {max_bytes}-byte limit; "
-                        "nothing was saved."
-                    )
-                digest.update(chunk)
-                _write_all(descriptor, chunk)
-            os.fsync(descriptor)
+            size, digest = _stream(chunks, descriptor, max_bytes)
+            _publish(cache, descriptor, temporary, final, directory)
         finally:
             os.close(descriptor)
-        _link(temporary, final)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            temporary.unlink()
-    return SavedFile(final, size, digest.hexdigest())
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary, dir_fd=cache)
+    return SavedFile(directory / final, size, digest)
+
+
+def _stream(chunks: Iterable[bytes], descriptor: int, max_bytes: int) -> tuple[int, str]:
+    digest, size = hashlib.sha256(), 0
+    for chunk in chunks:
+        size += len(chunk)
+        if size > max_bytes:
+            raise AttachmentTooLarge(
+                f"The attachment is larger than the {max_bytes}-byte limit; nothing was saved."
+            )
+        digest.update(chunk)
+        _write_all(descriptor, chunk)
+    os.fsync(descriptor)
+    return size, digest.hexdigest()
+
+
+def _publish(cache: int, descriptor: int, temporary: str, final: str, directory: Path) -> None:
+    # Keep the original descriptor open: a replaced temporary name must never
+    # publish someone else's inode, even when its bytes happen to match.
+    os.link(temporary, final, src_dir_fd=cache, dst_dir_fd=cache, follow_symlinks=False)
+    try:
+        status = os.stat(final, dir_fd=cache, follow_symlinks=False)
+        _check_identity(status, os.fstat(descriptor))
+        if not stat.S_ISREG(status.st_mode):
+            raise OSError("The saved attachment is not a regular file.")
+        _check_identity(directory.lstat(), os.fstat(cache))
+    except BaseException:
+        os.unlink(final, dir_fd=cache)
+        raise
 
 
 def _write_all(descriptor: int, data: bytes) -> None:
     view = memoryview(data)
     while view:
-        view = view[os.write(descriptor, view) :]
-
-
-def _link(source: Path, target: Path) -> None:
-    """Give ``source`` the name ``target``, never replacing an existing file."""
-    try:
-        os.link(source, target)
-    except FileExistsError:
-        raise
-    except OSError:
-        # A filesystem without hard links. rename() would replace an existing
-        # target on POSIX, so check first; the random token makes a race moot.
-        if os.path.lexists(target):
-            raise FileExistsError(target) from None
-        os.rename(source, target)
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("The attachment write made no progress.")
+        view = view[written:]
