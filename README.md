@@ -407,6 +407,12 @@ on the whole thing, so those three are genuinely different outcomes:
   message may well have arrived, and sending it again would deliver a second
   copy.
 
+Before sending a reply, reading the original's headers makes up to three attempts,
+one second apart, after positively identified transport failures. Each retry uses
+a fresh IMAP connection and checks the caller's expected Message-ID before SMTP.
+Authentication, certificate, protocol, and explicit negative responses are not
+retried; neither SMTP delivery nor the send handler is replayed.
+
 Every error from sending ends with "Nothing was sent" — whether it failed
 before a single byte was written or the server refused the finished message,
 nobody received anything, so trying again cannot deliver a duplicate.
@@ -628,6 +634,20 @@ so the plugin's own fence refuses anything else before a socket opens, and the
 test process asserts the same thing again before each call. Use a dedicated test
 mailbox regardless.
 
+The IMAP client makes up to three connection attempts after transient transport
+errors, before any caller operation runs. The live suite also makes up to three
+attempts for read-only handler transport failures after connection establishment;
+it does not repeat an exhausted connection retry sequence.
+Cleanup reconnects and rescans after a transport failure, requires two complete
+empty scans, and fails if it cannot verify removal. Fixture APPENDs make up to
+three attempts, two seconds apart, only after a completed `NO [UNAVAILABLE]`
+response. Each attempt uses the same message bytes and marker: unsuccessful
+APPENDs must leave the mailbox unchanged ([RFC 3501 §6.3.11](https://www.rfc-editor.org/rfc/rfc3501#section-6.3.11)),
+and `UNAVAILABLE` denotes a temporary backend failure
+([RFC 5530 §3](https://www.rfc-editor.org/rfc/rfc5530#section-3)). Transport failures,
+other APPEND responses, sends, and other test writes are not retried. Production
+APPEND remains a single attempt.
+
 ### Locally
 
 ```bash
@@ -644,12 +664,17 @@ Or keep both out of the command line, in `~/.yandex-mail-login` and
 
 The **E2E (live)** workflow is manual (`workflow_dispatch`). It reads
 `YANDEX_MAIL_LOGIN` and `YANDEX_MAIL_APP_PASSWORD` from a GitHub Environment
-named `yandex-mail-e2e`. It runs the plugin inside a real Hermes, installed by
+named `yandex-mail-e2e`. Runs share one concurrency group across all refs and
+Hermes inputs, so they use the account one at a time without canceling an active
+run's cleanup. Do not run local live tests against the same account while a
+workflow is running. It runs the plugin inside a real Hermes, installed by
 its official installer: the latest Hermes release by default, and its
 `hermes` input switches to Hermes `main` or to no Hermes at all. With Hermes, the
 tests run in Hermes' own Python, with this checkout on its path rather than
 installed into Hermes' environment, and the run fails outright if the plugin
 cannot import Hermes, rather than testing the plugin's stand-ins instead.
+The hosted runner uses `imap.ya.ru`, following [Yandex's recommendation for
+connections outside Russia](https://yandex.ru/support/yandex-360/customers/mail/ru/mail-clients/mail-clients-troubleshooting).
 
 ## Checking the install paths
 

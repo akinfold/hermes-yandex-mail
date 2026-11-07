@@ -8,6 +8,7 @@ a JSON string, and NEVER raises — every failure path becomes
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterator
 from email.message import EmailMessage
 from email.utils import make_msgid
@@ -29,7 +30,15 @@ from .config import (
     build_smtp_client,
     require_action,
 )
-from .imap import Folder, MailError, MessageSummary, ReplyAnchor, SearchQuery, YandexIMAPClient
+from .imap import (
+    Folder,
+    MailError,
+    MessageSummary,
+    ReplyAnchor,
+    SearchQuery,
+    YandexIMAPClient,
+    _transient_connect_error,
+)
 from .mime import MimePart
 from .paging import body_text, decoded_chunks, take_page, text_chunks
 from .smtp import DeliveryResult, SendError
@@ -796,6 +805,30 @@ def _reply_request(args: dict[str, Any]) -> tuple[str, str, str] | None:
     return str(int(uid)), parts["reply_to_folder"], parts["reply_to_message_id"]
 
 
+_ANCHOR_READ_ATTEMPTS = 3
+_ANCHOR_READ_RETRY_DELAY = 1.0
+
+
+def _read_anchor(uid: str, folder: str) -> tuple[str, ReplyAnchor | None]:
+    """Read reply headers on a fresh session after a transient read failure."""
+    for attempt in range(_ANCHOR_READ_ATTEMPTS):
+        with build_client() as client:
+            checked_folder = client.check_folder(folder)
+            # Connection recovery has its own budget; never repeat an exhausted one.
+            client.connect()
+            try:
+                resolved = client.resolve_folder(checked_folder)
+                return resolved, client.reply_anchor(resolved, uid)
+            except MailError as exc:
+                if (
+                    not _transient_connect_error(exc.__cause__)
+                    or attempt + 1 >= _ANCHOR_READ_ATTEMPTS
+                ):
+                    raise
+        time.sleep(_ANCHOR_READ_RETRY_DELAY)
+    raise AssertionError("Reply read attempts exhausted without a result")  # pragma: no cover
+
+
 def _fetch_anchor(reply: tuple[str, str, str]) -> ReplyAnchor:
     """Read back the message being replied to, and prove it is that message.
 
@@ -806,9 +839,7 @@ def _fetch_anchor(reply: tuple[str, str, str]) -> ReplyAnchor:
     you read".
     """
     uid, folder, expected = reply
-    with build_client() as client:
-        resolved = client.resolve_folder(client.check_folder(folder))
-        anchor = client.reply_anchor(resolved, uid)
+    resolved, anchor = _read_anchor(uid, folder)
     if anchor is None:
         raise MailError(
             f"Message {uid} is no longer in {resolved}, so there is nothing to reply to. "

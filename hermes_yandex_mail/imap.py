@@ -22,9 +22,11 @@ Data-safety rules encoded here, not left to the caller:
 from __future__ import annotations
 
 import contextlib
+import errno
 import imaplib
 import re
 import ssl
+import time
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -95,6 +97,50 @@ def _default_connection(host: str, port: int) -> imaplib.IMAP4:
 
 class MailError(RuntimeError):
     """Any IMAP-level failure: connection, authentication, or a NO/BAD reply."""
+
+
+class IMAPResponseError(MailError):
+    """A completed negative response, distinct from a transport exception."""
+
+    def __init__(self, command: str, status: str, text: str):
+        super().__init__(f"{command} failed: {text or status}")
+        self.command = command
+        self.status = status
+        match = re.match(r"^\[([A-Za-z][A-Za-z0-9-]*)(?: ([^\]\r\n]+))?\](?: |$)", text)
+        self.code = match.group(1).upper() if match else None
+        self.code_arguments = (match.group(2) or "") if match else ""
+
+
+_CONNECT_ATTEMPTS = 3
+_CONNECT_RETRY_DELAY = 1.0
+_TRANSIENT_CONNECT_ERRNOS = frozenset(
+    {
+        errno.ECONNABORTED,
+        errno.ECONNREFUSED,
+        errno.ECONNRESET,
+        errno.EHOSTUNREACH,
+        errno.ENETDOWN,
+        errno.ENETUNREACH,
+        errno.EPIPE,
+        errno.ETIMEDOUT,
+    }
+)
+_TRANSIENT_IMAP_ABORT = re.compile(
+    r"(?:^|=> )(?:problems with connection|socket error: EOF)$|"
+    r"socket error: .*?(?:connection reset by peer|network is unreachable|"
+    r"broken pipe|the read operation timed out)",
+    re.IGNORECASE,
+)
+
+
+def _transient_connect_error(exc: BaseException | None) -> bool:
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        return False
+    if isinstance(exc, (ConnectionError, TimeoutError)):
+        return True
+    if isinstance(exc, OSError):
+        return exc.errno in _TRANSIENT_CONNECT_ERRNOS
+    return isinstance(exc, imaplib.IMAP4.abort) and bool(_TRANSIENT_IMAP_ABORT.search(str(exc)))
 
 
 def normalize_email(value: str) -> str:
@@ -517,20 +563,38 @@ class YandexIMAPClient:
             return self._conn
         if not self._password.isascii():
             raise MailError("The Yandex Mail app password must contain only ASCII characters.")
+        for attempt in range(_CONNECT_ATTEMPTS):
+            try:
+                return self._connect_once()
+            except MailError as exc:
+                if attempt + 1 >= _CONNECT_ATTEMPTS or not _transient_connect_error(exc.__cause__):
+                    raise
+                time.sleep(_CONNECT_RETRY_DELAY)
+        raise AssertionError("Connection attempts exhausted without a result")  # pragma: no cover
+
+    def _connect_once(self) -> imaplib.IMAP4:
+        """Establish one session before any caller operation can run."""
         try:
             conn = self._factory(self._host, self._port)
-        except OSError as exc:
+        except (OSError, imaplib.IMAP4.error) as exc:
             raise MailError(f"Cannot reach {self._host}:{self._port}: {exc}") from exc
         try:
             conn.login(self._login, self._password)
-        except imaplib.IMAP4.error as exc:
+        except (OSError, imaplib.IMAP4.error) as exc:
+            # Failed authentication never reaches the cached connection, so
+            # close it here rather than leaving its socket outside close().
+            try:
+                conn.logout()
+            except (imaplib.IMAP4.error, OSError):
+                with contextlib.suppress(imaplib.IMAP4.error, OSError):
+                    conn.shutdown()
+            if isinstance(exc, (OSError, imaplib.IMAP4.abort)):
+                raise MailError(f"Login failed: {exc}") from exc
             raise MailError(
                 "Authentication failed. Use an app password with the Mail (IMAP) scope from "
                 "https://id.yandex.ru/security/app-passwords, and make sure IMAP is enabled "
                 f"for the account at https://mail.yandex.ru/#setup/client ({_first_text(exc.args)})"
             ) from exc
-        except OSError as exc:
-            raise MailError(f"Login failed: {exc}") from exc
         self._conn = conn
         # Read before anything selects a mailbox: imaplib fills `capabilities`
         # from the pre-authentication greeting and never refreshes it, while a
@@ -571,7 +635,7 @@ class YandexIMAPClient:
         except OSError as exc:
             raise MailError(f"{what} failed: {exc}") from exc
         if typ != "OK":
-            raise MailError(f"{what} failed: {_first_text(data) or typ}")
+            raise IMAPResponseError(what, typ, _first_text(data))
         return data
 
     def _capabilities(self) -> frozenset[str]:
