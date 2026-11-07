@@ -10,7 +10,10 @@ report an error at all.
 from __future__ import annotations
 
 import base64
+import imaplib
 import json
+import ssl
+from unittest.mock import Mock
 
 import pytest
 
@@ -18,7 +21,7 @@ from hermes_yandex_mail import compose, config, tool
 from hermes_yandex_mail.imap import YandexIMAPClient
 from hermes_yandex_mail.smtp import YandexSMTPClient
 
-from .conftest import FakeIMAP, FakeSMTP
+from .conftest import FakeIMAP, FakeSMTP, fetch_summary_response
 
 ACCOUNT = "me@yandex.ru"
 #: The Message-ID carried by the message ``FakeIMAP`` serves for every FETCH.
@@ -663,3 +666,190 @@ def test_every_refusal_from_this_path_says_nothing_was_sent(env, imap, smtp):
     for result in [*written_here, from_elsewhere]:
         assert result["error"].endswith("Nothing was sent."), result
     assert smtp.calls == []
+
+
+@pytest.fixture
+def anchor_recovery(monkeypatch):
+    sleep = Mock()
+    monkeypatch.setattr(tool.time, "sleep", sleep)
+    archive = Mock()
+    monkeypatch.setattr(tool, "_archive_and_flag", archive)
+
+    def wire(fakes):
+        clients = [
+            YandexIMAPClient(
+                login=ACCOUNT, password="secret", connection_factory=Mock(return_value=fake)
+            )
+            for fake in fakes
+        ]
+        build = Mock(side_effect=clients)
+        monkeypatch.setattr(tool, "build_client", build)
+        return build, clients, sleep, archive
+
+    return wire
+
+
+@pytest.mark.parametrize("command", ["FETCH", "SELECT"])
+def test_reply_anchor_transport_recovery_uses_fresh_session_and_sends_once(
+    env, smtp, anchor_recovery, command
+):
+    failed, ready = FakeIMAP(), FakeIMAP()
+    failed.responses[command] = imaplib.IMAP4.abort("command: UID => problems with connection")
+    build, clients, sleep, archive = anchor_recovery([failed, ready])
+    result = send(to="bob@example.org", body="b", **REPLY_ARGS)
+    assert result.get("sent") is True, result
+    assert result["in_reply_to"] == ANCHOR_ID
+    assert build.call_count == 2
+    assert all(fake.logged_out for fake in (failed, ready))
+    assert all(client._conn is None and client._selected is None for client in clients)
+    assert any(call[0] == "select" for call in ready.calls)
+    assert sum(call[0] == "mail" for call in smtp.calls) == 1
+    sleep.assert_called_once_with(1.0)
+    archive.assert_called_once()
+
+
+def test_three_reply_anchor_transport_failures_never_reach_smtp(env, smtp, anchor_recovery):
+    fakes = [FakeIMAP() for _ in range(3)]
+    for fake in fakes:
+        fake.responses["FETCH"] = ConnectionResetError("connection reset by peer")
+    build, clients, sleep, archive = anchor_recovery(fakes)
+    result = send(to="bob@example.org", body="b", **REPLY_ARGS)
+    assert "Nothing was sent" in result["error"]
+    assert build.call_count == 3
+    assert sleep.call_count == 2
+    assert all(fake.logged_out for fake in fakes)
+    assert all(client._conn is None for client in clients)
+    assert smtp.calls == []
+    archive.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ssl.SSLCertVerificationError("certificate verify failed"),
+        ssl.SSLError("unsupported protocol"),
+        imaplib.IMAP4.error("command: UID => problems with connection"),
+        imaplib.IMAP4.abort("malformed response"),
+        ("NO", [b"[UNAVAILABLE] backend down"]),
+    ],
+)
+def test_reply_anchor_nontransport_failure_is_not_retried(env, smtp, anchor_recovery, failure):
+    fake = FakeIMAP()
+    fake.responses["FETCH"] = failure
+    build, clients, sleep, archive = anchor_recovery([fake])
+    result = send(to="bob@example.org", body="b", **REPLY_ARGS)
+    assert "Nothing was sent" in result["error"]
+    build.assert_called_once()
+    sleep.assert_not_called()
+    assert fake.logged_out and clients[0]._conn is None
+    assert smtp.calls == []
+    archive.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        imaplib.IMAP4.error("invalid credentials"),
+        ssl.SSLCertVerificationError("certificate verify failed"),
+    ],
+)
+def test_reply_anchor_recovery_does_not_retry_failed_login(env, smtp, anchor_recovery, failure):
+    first, second = FakeIMAP(), FakeIMAP()
+    first.responses["FETCH"] = TimeoutError("read timed out")
+    second.login = Mock(side_effect=failure)
+    build, clients, sleep, archive = anchor_recovery([first, second])
+    result = send(to="bob@example.org", body="b", **REPLY_ARGS)
+    assert "Nothing was sent" in result["error"]
+    assert build.call_count == 2
+    second.login.assert_called_once()
+    sleep.assert_called_once_with(1.0)
+    assert first.logged_out and second.logged_out
+    assert all(client._conn is None for client in clients)
+    assert smtp.calls == []
+    archive.assert_not_called()
+
+
+def test_reply_anchor_does_not_multiply_exhausted_connection_attempts(env, smtp, anchor_recovery):
+    _build, clients, sleep, archive = anchor_recovery([FakeIMAP()])
+    factory = Mock(side_effect=ConnectionResetError("reset during connect"))
+    clients[0]._factory = factory
+    result = send(to="bob@example.org", body="b", **REPLY_ARGS)
+    assert "Cannot reach" in result["error"]
+    assert factory.call_count == 3
+    assert _build.call_count == 1
+    assert sleep.call_count == 2
+    assert smtp.calls == []
+    archive.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "headers,error",
+    [
+        (None, "no longer in"),
+        (b"Message-ID: <changed@example.org>\r\n\r\n", "not the one you read"),
+        (b"Subject: no identity\r\n\r\n", "carries no Message-ID"),
+    ],
+)
+def test_reply_anchor_identity_is_checked_after_recovery(
+    env, smtp, anchor_recovery, headers, error
+):
+    first, second = FakeIMAP(), FakeIMAP()
+    first.responses["FETCH"] = imaplib.IMAP4.abort("socket error: EOF")
+    second.responses["FETCH"] = (
+        "OK",
+        [] if headers is None else fetch_summary_response(headers=headers),
+    )
+    build, clients, _sleep, archive = anchor_recovery([first, second])
+    result = send(to="bob@example.org", body="b", **REPLY_ARGS)
+    assert error in result["error"]
+    assert build.call_count == 2
+    assert first.logged_out and second.logged_out
+    assert all(client._conn is None for client in clients)
+    assert smtp.calls == []
+    archive.assert_not_called()
+
+
+def test_reply_anchor_configuration_failure_is_not_retried(env, smtp, monkeypatch):
+    build = Mock(side_effect=ValueError("invalid configuration"))
+    monkeypatch.setattr(tool, "build_client", build)
+    result = send(to="bob@example.org", body="b", **REPLY_ARGS)
+    assert "invalid configuration" in result["error"]
+    build.assert_called_once()
+    assert smtp.calls == []
+
+
+def test_reply_anchor_recovery_never_replays_a_failed_smtp_send(env, monkeypatch, anchor_recovery):
+    first, second = FakeIMAP(), FakeIMAP()
+    first.responses["FETCH"] = imaplib.IMAP4.abort("problems with connection")
+    build, _clients, _sleep, archive = anchor_recovery([first, second])
+    smtp = wire_smtp(monkeypatch, FakeSMTP(final_code=554, final_text=b"message rejected"))
+    result = send(to="bob@example.org", body="b", **REPLY_ARGS)
+    assert "554" in result["error"]
+    assert build.call_count == 2
+    assert sum(call[0] == "mail" for call in smtp.calls) == 1
+    assert first.logged_out and second.logged_out
+    archive.assert_not_called()
+
+
+def test_disallowed_reply_folder_is_rejected_before_connecting(env, smtp, monkeypatch):
+    factory = Mock()
+    client = YandexIMAPClient(
+        login=ACCOUNT,
+        password="secret",
+        allowed_folders=["INBOX"],
+        connection_factory=factory,
+    )
+    connect = Mock(wraps=client.connect)
+    monkeypatch.setattr(client, "connect", connect)
+    build = Mock(return_value=client)
+    monkeypatch.setattr(tool, "build_client", build)
+    sleep = Mock()
+    monkeypatch.setattr(tool.time, "sleep", sleep)
+    result = send(to="bob@example.org", body="b", **{**REPLY_ARGS, "reply_to_folder": "Private"})
+    assert "not in the allowed list" in result["error"]
+    build.assert_called_once()
+    connect.assert_not_called()
+    factory.assert_not_called()
+    sleep.assert_not_called()
+    assert smtp.calls == []
+    assert client._conn is None

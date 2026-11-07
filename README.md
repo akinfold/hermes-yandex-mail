@@ -407,6 +407,12 @@ on the whole thing, so those three are genuinely different outcomes:
   message may well have arrived, and sending it again would deliver a second
   copy.
 
+Before sending a reply, reading the original's headers makes up to three attempts,
+one second apart, after positively identified transport failures. Each retry uses
+a fresh IMAP connection and checks the caller's expected Message-ID before SMTP.
+Authentication, certificate, protocol, and explicit negative responses are not
+retried; neither SMTP delivery nor the send handler is replayed.
+
 Every error from sending ends with "Nothing was sent" — whether it failed
 before a single byte was written or the server refused the finished message,
 nobody received anything, so trying again cannot deliver a duplicate.
