@@ -26,6 +26,12 @@ on:
 permissions:
   contents: read
 
+# Every input and ref uses the same test account. A canceled run can leave mail
+# behind before its fixture teardown completes.
+concurrency:
+  group: yandex-mail-e2e-account
+  cancel-in-progress: false
+
 jobs:
   e2e:
     name: Live end-to-end tests

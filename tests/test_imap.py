@@ -96,6 +96,42 @@ def test_unreachable_server_becomes_a_mail_error():
         client.connect()
 
 
+@pytest.mark.parametrize("error_type", [imaplib.IMAP4.abort, imaplib.IMAP4.error])
+def test_a_protocol_failure_during_connection_becomes_a_mail_error(error_type):
+    failure = error_type("command: CAPABILITY => problems with connection")
+
+    def explode(host, port):
+        raise failure
+
+    client = YandexIMAPClient("me@yandex.ru", "x", connection_factory=explode)
+    with pytest.raises(MailError, match=r"Cannot reach.*CAPABILITY") as caught:
+        client.connect()
+    assert caught.value.__cause__ is failure
+    assert client._conn is None
+
+
+@pytest.mark.parametrize(
+    "failure,expected",
+    [
+        (imaplib.IMAP4.abort("problems with connection"), "Login failed"),
+        (OSError("connection reset by peer"), "Login failed"),
+        (imaplib.IMAP4.error("invalid credentials"), "Authentication failed"),
+    ],
+)
+def test_a_failed_login_closes_the_uncached_connection(failure, expected):
+    class Rude(FakeIMAP):
+        def login(self, user, password):
+            raise failure
+
+    fake = Rude()
+    client = make_client(fake)
+    with pytest.raises(MailError, match=expected) as caught:
+        client.connect()
+    assert caught.value.__cause__ is failure
+    assert fake.logged_out
+    assert client._conn is None
+
+
 def test_close_swallows_a_failing_logout(fake_imap):
     fake_imap.logout_error = imaplib.IMAP4.error("connection reset")
     client = make_client(fake_imap)

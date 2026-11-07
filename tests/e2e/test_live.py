@@ -12,10 +12,10 @@ the test account, so mail is sent but never to a third party.
 from __future__ import annotations
 
 import base64
-import contextlib
 import hashlib
 import json
 import os
+import re
 import stat
 import time
 import uuid
@@ -44,6 +44,40 @@ MARKER_PREFIX = "hermes-yandex-mail e2e"
 #: pretending it is instant.
 _INDEX_TIMEOUT = 30.0
 _INDEX_POLL = 1.0
+
+
+# Match transport evidence only: authentication, certificate, and protocol errors
+# must remain visible on the first call.
+_TRANSPORT_ERROR = re.compile(
+    r"connection reset by peer|network is unreachable|network is down|"
+    r"no route to host|connection timed out|connection refused|"
+    r"socket error: (?:eof|\[errno (?:32|54|60|61|65|101|104|110|111|113)\])|"
+    r"server not connected|broken pipe|the handshake operation timed out|"
+    r"command: CAPABILITY => problems with connection|Login failed: problems with connection",
+    re.IGNORECASE,
+)
+_TRANSPORT_ATTEMPTS = 3
+_TRANSPORT_POLL = 2.0
+
+
+def _transport_failure(error: object) -> bool:
+    return bool(_TRANSPORT_ERROR.search(str(error)))
+
+
+def _read_only_handler(name: str, args: dict) -> dict:
+    """Retry a read-only handler only when it reports a transient transport error."""
+    handler = {
+        "read": tool.handle_read,
+        "search": tool.handle_search,
+        "list_folders": tool.handle_list_folders,
+    }[name]
+    for attempt in range(_TRANSPORT_ATTEMPTS):
+        payload = json.loads(handler(args))
+        if not _transport_failure(payload.get("error", "")):
+            return payload
+        if attempt + 1 < _TRANSPORT_ATTEMPTS:
+            time.sleep(_TRANSPORT_POLL)
+    return payload
 
 
 def _await_search(
@@ -110,11 +144,10 @@ def planted(client, account):
     """Upload a throwaway message and guarantee it is gone afterwards."""
     marker = uuid.uuid4().hex[:12]
     raw, token = _throwaway_message(account, marker)
-    uid = client.append("INBOX", raw, flags=["\\Seen"])
-    assert uid, "APPEND did not return an APPENDUID; the server may lack UIDPLUS"
-    state = {"uid": uid, "folder": "INBOX", "marker": marker, "token": token}
     try:
-        yield state
+        uid = client.append("INBOX", raw, flags=["\\Seen"])
+        assert uid, "APPEND did not return an APPENDUID; the server may lack UIDPLUS"
+        yield {"uid": uid, "folder": "INBOX", "marker": marker, "token": token}
     finally:
         _purge_everywhere(marker)
 
@@ -138,11 +171,7 @@ def _find_everywhere(client: YandexIMAPClient, marker: str) -> list[tuple[str, s
     hits: list[tuple[str, str]] = []
     for folder in client.list_folders():
         for query in (SearchQuery(text=marker), SearchQuery(subject=marker)):
-            try:
-                found = client.search(folder.name, query, limit=50)
-            except MailError:  # pragma: no cover - diagnostics only
-                # One unreadable folder must not stop the others being cleaned.
-                continue
+            found = client.search(folder.name, query, limit=50)
             hits += [(folder.name, message.uid) for message in found]
     return sorted(set(hits))
 
@@ -158,21 +187,31 @@ def _purge_everywhere(marker: str) -> None:
     """
     deadline = time.monotonic() + _PURGE_TIMEOUT
     quiet = 0
-    while quiet < 2:
-        with config.build_client() as cleanup:
-            hits = _find_everywhere(cleanup, marker)
-            for folder, uid in hits:
-                with contextlib.suppress(MailError):
+    failures = 0
+    last_failure = "messages remain or indexing has not settled"
+    while True:
+        try:
+            with config.build_client() as cleanup:
+                hits = _find_everywhere(cleanup, marker)
+                for folder, uid in hits:
                     cleanup.delete(folder, [uid], permanent=True)
-        quiet = 0 if hits else quiet + 1
-        if time.monotonic() > deadline:
-            break
-        if quiet < 2:
-            time.sleep(_PURGE_POLL)
-    with config.build_client() as cleanup:
-        left = _find_everywhere(cleanup, marker)
-    if left:  # pragma: no cover - only when the server never settles
-        raise RuntimeError(f"live cleanup left {marker} behind in {left}")
+        except (MailError, OSError) as exc:
+            quiet = 0
+            failures += 1
+            last_failure = str(exc)
+            if not _transport_failure(exc) or failures >= _TRANSPORT_ATTEMPTS:
+                raise RuntimeError(
+                    f"live cleanup could not verify removal of {marker}: {exc}"
+                ) from exc
+        else:
+            quiet = 0 if hits else quiet + 1
+            last_failure = f"remaining copies: {hits}"
+            if quiet >= 2:
+                return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"live cleanup timed out for {marker}: {last_failure}")
+        # Reconnect and rescan after an uncertain delete; never replay its old UID.
+        time.sleep(_PURGE_POLL)
 
 
 def test_folders_report_roles_and_counts(client):
@@ -200,7 +239,7 @@ def test_search_finds_the_planted_message(client, planted):
 
 
 def test_read_prefers_the_plain_part_and_lists_the_attachment(planted):
-    payload = json.loads(tool.handle_read({"uid": planted["uid"], "folder": "INBOX"}))
+    payload = _read_only_handler("read", {"uid": planted["uid"], "folder": "INBOX"})
     assert "error" not in payload, payload
     message = payload["message"]
     assert planted["token"] in message["body"]
@@ -226,10 +265,8 @@ def _read_pages(uid: str, max_chars: int) -> tuple[str, int, dict]:
     """Read a message page by page; return the joined body, the call count, the last page."""
     text, offset = [], 0
     for calls in range(1, 101):
-        payload = json.loads(
-            tool.handle_read(
-                {"uid": uid, "folder": "INBOX", "offset": offset, "max_chars": max_chars}
-            )
+        payload = _read_only_handler(
+            "read", {"uid": uid, "folder": "INBOX", "offset": offset, "max_chars": max_chars}
         )
         assert "error" not in payload, payload
         page = payload["message"]
@@ -241,7 +278,7 @@ def _read_pages(uid: str, max_chars: int) -> tuple[str, int, dict]:
 
 
 def test_text_pages(planted):
-    full = json.loads(tool.handle_read({"uid": planted["uid"], "folder": "INBOX"}))["message"]
+    full = _read_only_handler("read", {"uid": planted["uid"], "folder": "INBOX"})["message"]
     text, calls, _page = _read_pages(planted["uid"], 10)
     assert text == full["body"]
     assert calls > 1
@@ -414,12 +451,12 @@ def test_move_to_trash_then_purge(client, planted):
 
 
 def test_the_tool_handlers_work_against_the_live_account(client, planted):
-    folders = json.loads(tool.handle_list_folders({}))
+    folders = _read_only_handler("list_folders", {})
     assert "error" not in folders, folders
     assert folders["count"] >= 1
 
     _await_search(client, "INBOX", planted["marker"], expect_found=True)
-    search = json.loads(tool.handle_search({"subject": planted["marker"], "limit": 5}))
+    search = _read_only_handler("search", {"subject": planted["marker"], "limit": 5})
     assert "error" not in search, search
     assert search["count"] == 1, search
 
@@ -466,7 +503,7 @@ def _wait_for_delivery(client: YandexIMAPClient, folder: str, marker: str):
         time.sleep(2.0)
 
 
-def test_sending_to_self_arrives_and_is_filed_in_sent(client, account, sending):
+def test_sending_to_self_arrives_and_is_filed_in_sent(account, sending):
     marker = uuid.uuid4().hex[:12]
     try:
         result = _only_to_self(
@@ -489,7 +526,7 @@ def test_sending_to_self_arrives_and_is_filed_in_sent(client, account, sending):
             assert filed, f"no copy of the message in {sent_folder}"
             delivered = _wait_for_delivery(reader, "INBOX", marker)
             assert delivered, "the message never arrived in INBOX"
-            payload = json.loads(tool.handle_read({"uid": delivered[0].uid, "folder": "INBOX"}))
+            payload = _read_only_handler("read", {"uid": delivered[0].uid, "folder": "INBOX"})
         assert marker in payload["message"]["body"]
         assert "Тело письма" in payload["message"]["body"], payload["message"]["body"][:200]
     finally:
@@ -526,7 +563,7 @@ def test_a_reply_threads_onto_the_message_it_answers(client, account, planted, s
         _purge_everywhere(marker)
 
 
-def test_the_fence_refuses_a_stranger_before_anything_is_sent(client, account, sending):
+def test_the_fence_refuses_a_stranger_before_anything_is_sent(account, sending):
     """The one live check that must NOT send: an address outside the fence."""
     result = json.loads(
         tool.handle_send(
@@ -541,7 +578,7 @@ def test_the_fence_refuses_a_stranger_before_anything_is_sent(client, account, s
     assert config.ENV_SEND_TO in result["error"]
 
 
-def test_sending_is_refused_when_the_action_is_not_enabled(client, account, monkeypatch):
+def test_sending_is_refused_when_the_action_is_not_enabled(account, monkeypatch):
     monkeypatch.setenv(config.ENV_ACTIONS, "all")
     result = json.loads(
         tool.handle_send({"to": account, "subject": "must not be sent", "body": "no"})

@@ -628,6 +628,11 @@ so the plugin's own fence refuses anything else before a socket opens, and the
 test process asserts the same thing again before each call. Use a dedicated test
 mailbox regardless.
 
+Read-only handlers make up to three attempts after transient transport errors.
+Cleanup reconnects and rescans after a transport failure, requires two complete
+empty scans, and fails if it cannot verify removal. Sends and other test writes
+are not retried.
+
 ### Locally
 
 ```bash
@@ -644,7 +649,10 @@ Or keep both out of the command line, in `~/.yandex-mail-login` and
 
 The **E2E (live)** workflow is manual (`workflow_dispatch`). It reads
 `YANDEX_MAIL_LOGIN` and `YANDEX_MAIL_APP_PASSWORD` from a GitHub Environment
-named `yandex-mail-e2e`. It runs the plugin inside a real Hermes, installed by
+named `yandex-mail-e2e`. Runs share one concurrency group across all refs and
+Hermes inputs, so they use the account one at a time without canceling an active
+run's cleanup. Do not run local live tests against the same account while a
+workflow is running. It runs the plugin inside a real Hermes, installed by
 its official installer: the latest Hermes release by default, and its
 `hermes` input switches to Hermes `main` or to no Hermes at all. With Hermes, the
 tests run in Hermes' own Python, with this checkout on its path rather than

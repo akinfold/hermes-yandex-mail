@@ -519,18 +519,22 @@ class YandexIMAPClient:
             raise MailError("The Yandex Mail app password must contain only ASCII characters.")
         try:
             conn = self._factory(self._host, self._port)
-        except OSError as exc:
+        except (OSError, imaplib.IMAP4.error) as exc:
             raise MailError(f"Cannot reach {self._host}:{self._port}: {exc}") from exc
         try:
             conn.login(self._login, self._password)
-        except imaplib.IMAP4.error as exc:
+        except (OSError, imaplib.IMAP4.error) as exc:
+            # Failed authentication never reaches the cached connection, so
+            # close it here rather than leaving its socket outside close().
+            with contextlib.suppress(imaplib.IMAP4.error, OSError):
+                conn.logout()
+            if isinstance(exc, (OSError, imaplib.IMAP4.abort)):
+                raise MailError(f"Login failed: {exc}") from exc
             raise MailError(
                 "Authentication failed. Use an app password with the Mail (IMAP) scope from "
                 "https://id.yandex.ru/security/app-passwords, and make sure IMAP is enabled "
                 f"for the account at https://mail.yandex.ru/#setup/client ({_first_text(exc.args)})"
             ) from exc
-        except OSError as exc:
-            raise MailError(f"Login failed: {exc}") from exc
         self._conn = conn
         # Read before anything selects a mailbox: imaplib fills `capabilities`
         # from the pre-authentication greeting and never refreshes it, while a
