@@ -552,3 +552,94 @@ def test_delete_of_a_missing_uid_in_trash_reports_it_missing(imap):
     assert "404 not found in 'Trash'" in result["error"]
     assert "reason" not in result and "deleted" not in result
     assert imap.command_names() == ["FETCH"]
+
+
+@pytest.mark.parametrize(
+    "handler,args",
+    [
+        (tool.handle_list_folders, {}),
+        (tool.handle_send, {"to": "bob@example.org", "subject": "s", "body": "b"}),
+    ],
+)
+def test_non_ascii_password_is_rejected_without_echoing_characters_or_positions(
+    monkeypatch, handler, args
+):
+    from hermes_yandex_mail import config, imap, smtp
+
+    values = {
+        config.ENV_LOGIN: "me@yandex.ru",
+        config.ENV_PASSWORD: "private\u2603password",
+        config.ENV_ACTIONS: "all,send_message",
+    }
+    monkeypatch.setattr(config, "env_value", values.get)
+    opened = []
+    monkeypatch.setattr(imap, "_default_connection", lambda *_: opened.append("imap"))
+    monkeypatch.setattr(smtp, "_default_connection", lambda *_: opened.append("smtp"))
+    result = json.loads(handler(args))
+    assert "ASCII" in result["error"]
+    assert "\u2603" not in result["error"]
+    assert "2603" not in result["error"]
+    assert "position" not in result["error"]
+    assert "private" not in result["error"]
+    assert opened == []
+
+
+@pytest.mark.parametrize(
+    "handler,args,host_name",
+    [
+        (tool.handle_list_folders, {}, "YANDEX_MAIL_IMAP_HOST"),
+        (
+            tool.handle_send,
+            {"to": "bob@example.org", "subject": "s", "body": "b"},
+            "YANDEX_MAIL_SMTP_HOST",
+        ),
+    ],
+)
+def test_invalid_host_never_opens_a_connection(monkeypatch, handler, args, host_name):
+    from hermes_yandex_mail import config, imap, smtp
+
+    values = {
+        config.ENV_LOGIN: "me@yandex.ru",
+        config.ENV_PASSWORD: "pw",
+        config.ENV_ACTIONS: "all,send_message",
+        host_name: "mail.example:993",
+    }
+    monkeypatch.setattr(config, "env_value", values.get)
+    opened = []
+    monkeypatch.setattr(imap, "_default_connection", lambda *_: opened.append("imap"))
+    monkeypatch.setattr(smtp, "_default_connection", lambda *_: opened.append("smtp"))
+    result = json.loads(handler(args))
+    assert "hostname" in result["error"]
+    assert opened == []
+
+
+def test_failed_path_translation_removes_the_saved_attachment(monkeypatch, tmp_path):
+    import base64
+
+    from hermes_yandex_mail import config
+
+    from .test_paging import YANDEX_CYRILLIC_ATTACHMENT, MimeIMAP
+
+    fake = MimeIMAP()
+    fake.response = YANDEX_CYRILLIC_ATTACHMENT
+    fake.parts = {"2": base64.encodebytes(b"private attachment bytes")}
+    monkeypatch.setattr(
+        tool,
+        "build_client",
+        lambda: YandexIMAPClient("fixture", "fixture", connection_factory=lambda *_: fake),
+    )
+    monkeypatch.setattr(tool, "document_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(config, "env_value", lambda _name: None)
+    translated = []
+
+    def fail(path):
+        assert path.read_bytes() == b"private attachment bytes"
+        translated.append(path)
+        raise RuntimeError("Sandbox path translation failed")
+
+    monkeypatch.setattr(tool, "agent_visible_path", fail)
+    result = call(tool.handle_save_attachment, uid="8", folder="INBOX", part_id="2")
+    assert "Sandbox path translation failed" in result["error"]
+    assert len(translated) == 1
+    assert list(tmp_path.iterdir()) == []
+    assert not any(c[0] == "uid" and c[1] == "STORE" for c in fake.calls)

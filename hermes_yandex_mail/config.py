@@ -1,12 +1,15 @@
 """Build an IMAP client from the environment, and decide what it may do.
 
-Secrets are resolved via :func:`get_provider_env` (env vars, then
-``~/.hermes/.env``). Nothing here logs secret values.
+Configuration is resolved through Hermes' current-profile secret scope, or the
+process environment outside Hermes. Nothing here logs secret values.
 """
 
 from __future__ import annotations
 
-from ._compat import get_provider_env, provider_env_is_set
+import ipaddress
+import re
+
+from ._compat import env_value
 from .imap import DEFAULT_HOST, DEFAULT_PORT, YandexIMAPClient
 from .smtp import DEFAULT_SMTP_HOST, DEFAULT_SMTP_PORT, YandexSMTPClient
 
@@ -107,9 +110,27 @@ __all__ = [
 ]
 
 
+def _value(name: str) -> str:
+    return env_value(name) or ""
+
+
+def _host(name: str, default: str) -> str:
+    host = _value(name) or default
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        labels = host.removesuffix(".").split(".")
+        if len(host) > 253 or not all(
+            re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+            for label in labels
+        ):
+            raise ValueError(f"{name} must be an ASCII DNS hostname or an IP address.") from None
+    return host
+
+
 def allowed_folders() -> list[str]:
     """The comma-separated allow-list of folder names, or ``[]`` for all."""
-    raw = get_provider_env(ENV_FOLDERS)
+    raw = _value(ENV_FOLDERS)
     return [f.strip() for f in raw.split(",") if f.strip()]
 
 
@@ -130,7 +151,7 @@ def allowed_actions() -> frozenset[str]:
     checked again by each handler. Restart Hermes after editing configuration
     so its environment and registered toolset both reflect the change.
     """
-    raw = get_provider_env(ENV_ACTIONS)
+    raw = _value(ENV_ACTIONS)
     if not raw.strip():
         return DEFAULT_ACTIONS
     allowed: set[str] = set()
@@ -159,7 +180,10 @@ def require_action(action: str) -> None:
 
 def credentials_present() -> bool:
     """Cheap check (no network) for the ``check_fn`` / availability gate."""
-    return bool(get_provider_env(ENV_LOGIN) and get_provider_env(ENV_PASSWORD))
+    try:
+        return bool(_value(ENV_LOGIN) and _value(ENV_PASSWORD))
+    except Exception:
+        return False
 
 
 def allowed_send_recipients() -> list[str] | None:
@@ -173,19 +197,11 @@ def allowed_send_recipients() -> list[str] | None:
     intended. Whitespace and a bare ``YANDEX_MAIL_SEND_TO=`` are covered by
     that, not by ``None``.
 
-    What is *not* guaranteed: whether the variable is set is decided by
-    :func:`provider_env_is_set`, which can see ``os.environ`` and
-    ``~/.hermes/.env`` and nothing else. Under a Hermes host a value may also
-    arrive from Hermes' own configuration layer, which this plugin cannot
-    inspect without importing host internals. A fence supplied only that way,
-    and only as whitespace, still reads as no fence at all.
+    Presence and value come from one profile-scoped read, so an empty value
+    cannot fall through to another profile or remove the fence.
     """
-    # The resolved value cannot answer this on its own: it is stripped before
-    # it gets here, so "unset" and "set to whitespace" look identical. The
-    # presence of the name is what tells them apart, and a fence somebody meant
-    # to write must refuse rather than disappear.
-    raw = get_provider_env(ENV_SEND_TO)
-    if not raw and not provider_env_is_set(ENV_SEND_TO):
+    raw = env_value(ENV_SEND_TO)
+    if raw is None:
         return None
     entries = [item.strip() for item in raw.split(",")]
     return [entry for entry in entries if _is_fence_entry(entry)]
@@ -199,8 +215,8 @@ def attachment_max_bytes() -> int:
     back to the default: ``100MB`` or ``10 MiB`` typed as a tighter cap must not
     quietly become a looser one.
     """
-    raw = get_provider_env(ENV_ATTACHMENT_MAX_BYTES)
-    if not raw and not provider_env_is_set(ENV_ATTACHMENT_MAX_BYTES):
+    raw = env_value(ENV_ATTACHMENT_MAX_BYTES)
+    if raw is None:
         return DEFAULT_ATTACHMENT_MAX_BYTES
     try:
         limit = int(raw)
@@ -222,7 +238,7 @@ def _is_fence_entry(entry: str) -> bool:
 
 
 def _int_env(name: str, default: int) -> int:
-    raw = get_provider_env(name)
+    raw = _value(name)
     try:
         return int(raw) if raw else default
     except ValueError:
@@ -234,13 +250,15 @@ def _port() -> int:
 
 
 def _credentials() -> tuple[str, str]:
-    login = get_provider_env(ENV_LOGIN)
-    password = get_provider_env(ENV_PASSWORD)
+    login = _value(ENV_LOGIN)
+    password = _value(ENV_PASSWORD)
     if not login or not password:
         raise MissingCredentials(
             f"{ENV_LOGIN} and {ENV_PASSWORD} must be set (create an app password with the "
             "Mail (IMAP) scope at https://id.yandex.ru/security/app-passwords)."
         )
+    if not password.isascii():
+        raise MissingCredentials("The Yandex Mail app password must contain only ASCII characters.")
     return login, password
 
 
@@ -263,7 +281,7 @@ def build_smtp_client() -> YandexSMTPClient:
     return YandexSMTPClient(
         login=login,
         password=password,
-        host=get_provider_env(ENV_SMTP_HOST) or DEFAULT_SMTP_HOST,
+        host=_host(ENV_SMTP_HOST, DEFAULT_SMTP_HOST),
         port=_int_env(ENV_SMTP_PORT, DEFAULT_SMTP_PORT),
     )
 
@@ -274,7 +292,7 @@ def build_client() -> YandexIMAPClient:
     return YandexIMAPClient(
         login=login,
         password=password,
-        host=get_provider_env(ENV_HOST) or DEFAULT_HOST,
+        host=_host(ENV_HOST, DEFAULT_HOST),
         port=_port(),
         allowed_folders=allowed_folders(),
     )

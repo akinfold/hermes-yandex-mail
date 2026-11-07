@@ -196,6 +196,8 @@ class YandexSMTPClient:
     def connect(self) -> smtplib.SMTP:
         if self._conn is not None:
             return self._conn
+        if not self._password.isascii():
+            raise SendError("The Yandex Mail app password must contain only ASCII characters.")
         conn = None
         try:
             conn = self._factory(self._host, self._port)

@@ -515,6 +515,8 @@ class YandexIMAPClient:
         """Open and authenticate the connection, or return the open one."""
         if self._conn is not None:
             return self._conn
+        if not self._password.isascii():
+            raise MailError("The Yandex Mail app password must contain only ASCII characters.")
         try:
             conn = self._factory(self._host, self._port)
         except OSError as exc:

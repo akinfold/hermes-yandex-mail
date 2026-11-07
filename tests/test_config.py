@@ -10,17 +10,11 @@ from hermes_yandex_mail.imap import DEFAULT_HOST, DEFAULT_PORT
 
 @pytest.fixture
 def env(monkeypatch):
-    """A dict standing in for the environment ``get_provider_env`` reads.
-
-    Values come back *stripped*, the way both the real ``get_provider_env`` and
-    the bundled shim hand them over, and presence is answered by the key alone.
-    A stand-in that skipped the stripping would make "set to whitespace" look
-    distinguishable from "unset" here while it is not in production — which is
-    how the recipient fence came to fail open.
-    """
+    """Current-profile values, with absent keys distinct from empty values."""
     values: dict[str, str] = {}
-    monkeypatch.setattr(config, "get_provider_env", lambda name: values.get(name, "").strip())
-    monkeypatch.setattr(config, "provider_env_is_set", lambda name: name in values)
+    monkeypatch.setattr(
+        config, "env_value", lambda name: None if name not in values else values[name].strip()
+    )
     return values
 
 
@@ -255,15 +249,57 @@ def test_a_usable_fence_survives_the_real_resolver(real_env, monkeypatch):
     assert config.allowed_send_recipients() == ["owner@yandex.ru", "@example.org"]
 
 
-def test_a_fence_named_only_in_the_hermes_env_file_counts_as_set(real_env):
-    (real_env / ".hermes").mkdir()
-    (real_env / ".hermes" / ".env").write_text(f"{config.ENV_SEND_TO}=\n", encoding="utf-8")
-    assert config.allowed_send_recipients() == []
-
-
-def test_a_fence_written_in_the_hermes_env_file_is_parsed(real_env):
+def test_standalone_configuration_does_not_read_the_default_profile_file(real_env):
     (real_env / ".hermes").mkdir()
     (real_env / ".hermes" / ".env").write_text(
-        f"{config.ENV_SEND_TO}=owner@yandex.ru,@example.org\n", encoding="utf-8"
+        f"{config.ENV_SEND_TO}=owner@yandex.ru\n", encoding="utf-8"
     )
-    assert config.allowed_send_recipients() == ["owner@yandex.ru", "@example.org"]
+    assert config.allowed_send_recipients() is None
+
+
+@pytest.mark.parametrize(
+    "name,builder",
+    [(config.ENV_HOST, config.build_client), (config.ENV_SMTP_HOST, config.build_smtp_client)],
+)
+@pytest.mark.parametrize(
+    "host",
+    [
+        "tls://mail.example",
+        "owner@mail.example",
+        "mail.example/path",
+        "mail.example:993",
+        "mail example",
+        "mail\x00example",
+        "mail\nexample",
+        "mail\texample",
+        "[::1]",
+        "-mail.example",
+        "mail-.example",
+        "mail..example",
+        "máil.example",
+        "a" * 64 + ".example",
+    ],
+)
+def test_invalid_endpoint_syntax_is_rejected_before_client_creation(env, name, builder, host):
+    env.update({config.ENV_LOGIN: "me@yandex.ru", config.ENV_PASSWORD: "pw", name: host})
+    with pytest.raises(ValueError, match="ASCII DNS hostname or an IP address"):
+        builder()
+
+
+@pytest.mark.parametrize("host", ["mail.example", "localhost", "mail.example.", "127.0.0.1", "::1"])
+def test_valid_endpoint_syntax_is_preserved(env, host):
+    env.update({config.ENV_LOGIN: "me@yandex.ru", config.ENV_PASSWORD: "pw", config.ENV_HOST: host})
+    assert config.build_client()._host == host
+
+
+@pytest.mark.parametrize("operation", [config.allowed_send_recipients, config.attachment_max_bytes])
+def test_nullable_policy_settings_use_a_single_atomic_read(monkeypatch, operation):
+    reads = []
+
+    def resolve(name):
+        reads.append(name)
+        return None if len(reads) == 1 else ""
+
+    monkeypatch.setattr(config, "env_value", resolve)
+    operation()
+    assert len(reads) == 1

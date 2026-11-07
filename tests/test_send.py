@@ -38,8 +38,9 @@ def env(monkeypatch) -> dict[str, str]:
         config.ENV_PASSWORD: "secret",
         config.ENV_ACTIONS: "all,send_message",
     }
-    monkeypatch.setattr(config, "get_provider_env", lambda name: values.get(name, "").strip())
-    monkeypatch.setattr(config, "provider_env_is_set", lambda name: name in values)
+    monkeypatch.setattr(
+        config, "env_value", lambda name: None if name not in values else values[name].strip()
+    )
     return values
 
 
@@ -413,7 +414,7 @@ def test_the_handler_never_raises_and_always_returns_json(env, imap, monkeypatch
 
 
 def test_missing_credentials_are_reported_not_raised(monkeypatch, imap, smtp):
-    monkeypatch.setattr(config, "get_provider_env", lambda name: "")
+    monkeypatch.setattr(config, "env_value", lambda name: "")
     result = send(to="bob@example.org", subject="s", body="b")
     assert "error" in result
 

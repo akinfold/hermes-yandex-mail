@@ -71,11 +71,11 @@ The plugin follows the Hermes plugin contract; a few of these are load-bearing:
 - **Address comparison** goes through `imap.normalize_email` — Yandex treats
   `@ya.ru` and `@yandex.ru` as the same mailbox, and a second private copy of
   that rule will eventually disagree with the first.
-- **Secrets** are resolved via `_compat.get_provider_env`; never log their values.
-  That value arrives stripped, so it cannot tell "unset" from "set to
-  whitespace". When absence and emptiness must mean different things — as they
-  do for `YANDEX_MAIL_SEND_TO`, where absence means "no fence" — ask
-  `_compat.provider_env_is_set` as well.
+- **Secrets** are resolved through `_compat.env_value`, using Hermes' public
+  `agent.secret_scope.get_secret` for the active profile. Preserve `None`
+  (unset) versus `""` (explicitly empty); do not read another profile's `.env`
+  file or fall back to process values inside a Hermes scope. Outside Hermes,
+  read only the process environment. Never log secret values.
 - **Non-ASCII on the wire.** `imaplib` encodes `str` arguments as ASCII, so any
   argument that can carry Cyrillic must be passed as `bytes` — folder names as
   modified UTF-7 through `_quote_mailbox` (RFC 3501), search terms as UTF-8

@@ -364,9 +364,12 @@ def with_action_guard(action: str, handler: Any) -> Any:
     def guarded(args: dict[str, Any], **kwargs: Any) -> str:
         try:
             require_action(action)
-        except PermissionDenied as exc:
+        except Exception as exc:
             return _error(ending(str(exc)))
-        return handler(args, **kwargs)
+        try:
+            return handler(args, **kwargs)
+        except Exception as exc:
+            return _error(ending(f"Unexpected tool error: {exc}"))
 
     return guarded
 
@@ -617,6 +620,11 @@ def handle_save_attachment(args: dict[str, Any], **_kwargs: Any) -> str:
                 attachment.safe_filename(_saved_name(part), part.part_id),
                 max_bytes,
             )
+        try:
+            visible_path = agent_visible_path(saved.path)
+        except Exception:
+            saved.path.unlink(missing_ok=True)
+            raise
         return _dump(
             {
                 "attachment": {
@@ -627,7 +635,7 @@ def handle_save_attachment(args: dict[str, Any], **_kwargs: Any) -> str:
                     "content_type": part.content_type,
                     "size": saved.size,
                     "sha256": saved.sha256,
-                    "path": agent_visible_path(saved.path),
+                    "path": visible_path,
                 }
             }
         )

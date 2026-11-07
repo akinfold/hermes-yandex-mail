@@ -276,6 +276,7 @@ def _assert_loaded(home: Home, *, source: str, version: str | None = VERSION) ->
         return
     assert plugin["version"] == version, plugin
     assert plugin["tools"] == len(DEFAULT_TOOLS), plugin
+    assert report.get("mail_boundary"), "The installed plugin did not expose its host boundary"
 
     mine = {name: toolset for name, toolset in report["tools"].items() if toolset == PLUGIN}
     assert set(mine) == DEFAULT_TOOLS, sorted(report["tools"])

@@ -23,10 +23,92 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 import traceback
 
 
+def _mail_boundary() -> dict | None:
+    """Exercise the installed plugin's secret and cache-path host APIs."""
+    candidates = [
+        module
+        for name, module in list(sys.modules.items())
+        if name.endswith("._compat")
+        and hasattr(module, "env_value")
+        and getattr(sys.modules.get(name.removesuffix("._compat") + ".config"), "ENV_LOGIN", None)
+        == "YANDEX_MAIL_LOGIN"
+    ]
+    if not candidates:
+        # Upgrade checks also probe the previous release, before it has this API.
+        return None
+    assert len(candidates) == 1, "Expected one installed Yandex Mail module"
+    compat = candidates[0]
+    package = compat.__name__.removesuffix("._compat")
+    config = sys.modules[package + ".config"]
+    tool = sys.modules[package + ".tool"]
+    from agent import secret_scope
+    from tools import credential_files
+
+    active = secret_scope.is_multiplex_active()
+    scope = secret_scope.set_secret_scope(
+        {
+            config.ENV_SEND_TO: "",
+            config.ENV_ATTACHMENT_MAX_BYTES: "",
+            config.ENV_ACTIONS: "read",
+            config.ENV_LOGIN: "probe@example.org",
+            config.ENV_PASSWORD: "probe-password",
+        }
+    )
+    try:
+        secret_scope.set_multiplex_active(True)
+        assert compat.env_value("YANDEX_MAIL_PROBE_ABSENT") is None
+        assert config.allowed_send_recipients() == []
+        try:
+            config.attachment_max_bytes()
+        except config.PermissionDenied:
+            pass
+        else:
+            raise AssertionError("An empty profile attachment cap must refuse saves")
+        assert config.allowed_actions() == {"list_folders", "search_messages", "read_message"}
+        assert config.credentials_present()
+    finally:
+        secret_scope.reset_secret_scope(scope)
+        secret_scope.set_multiplex_active(active)
+
+    scope = secret_scope.set_secret_scope(None)
+    try:
+        secret_scope.set_multiplex_active(True)
+        assert config.credentials_present() is False
+        guarded = tool.with_action_guard("list_folders", tool.handle_list_folders)
+        assert "error" in json.loads(guarded({}))
+    finally:
+        secret_scope.reset_secret_scope(scope)
+        secret_scope.set_multiplex_active(active)
+
+    directory = compat.document_cache_dir()
+    path = directory / "yandex-mail-probe.txt"
+    backend = credential_files._terminal_backend
+    mapped = {}
+    try:
+        for name, prefix in [
+            ("local", str(directory)),
+            ("docker", "/root/.hermes/cache/documents"),
+            ("ssh", "~/.hermes/cache/documents"),
+        ]:
+            credential_files._terminal_backend = lambda name=name: name
+            mapped[name] = compat.agent_visible_path(path)
+            assert mapped[name] == prefix + "/yandex-mail-probe.txt", mapped
+    finally:
+        credential_files._terminal_backend = backend
+    return {"profile_scope": True, "scope_errors": True, "cache_paths": mapped}
+
+
 def _report() -> dict:
+    from hermes_cli.config import get_project_root
+    from hermes_cli.env_loader import load_hermes_dotenv
+
+    # Match CLI startup before imports or discovery can check tool credentials.
+    load_hermes_dotenv(project_env=get_project_root() / ".env")
+
     import model_tools
     from hermes_cli.config import load_config
     from hermes_cli.plugins import discover_plugins, get_plugin_manager
@@ -44,7 +126,7 @@ def _report() -> dict:
         name = definition["function"]["name"]
         entry = registry.get_entry(name)
         tools[name] = entry.toolset if entry else None
-    return {"plugins": plugins, "tools": tools}
+    return {"plugins": plugins, "tools": tools, "mail_boundary": _mail_boundary()}
 
 
 def main() -> None:

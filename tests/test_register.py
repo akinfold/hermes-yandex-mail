@@ -19,7 +19,7 @@ class FakeCtx:
 def _register_with(monkeypatch, actions: str) -> list[str]:
     monkeypatch.setattr(
         config,
-        "get_provider_env",
+        "env_value",
         lambda name: actions if name == config.ENV_ACTIONS else "",
     )
     ctx = FakeCtx()
@@ -95,7 +95,7 @@ def test_unknown_action_registers_nothing(monkeypatch):
 
 @pytest.mark.parametrize("field", ["schema", "handler", "check_fn", "requires_env"])
 def test_registration_payload(monkeypatch, field):
-    monkeypatch.setattr(config, "get_provider_env", lambda name: "")
+    monkeypatch.setattr(config, "env_value", lambda name: "")
     ctx = FakeCtx()
     plugin.register(ctx)
     assert all(t[field] for t in ctx.tools)
