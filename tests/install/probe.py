@@ -103,6 +103,12 @@ def _mail_boundary() -> dict | None:
 
 
 def _report() -> dict:
+    from hermes_cli.config import get_project_root
+    from hermes_cli.env_loader import load_hermes_dotenv
+
+    # Match CLI startup before imports or discovery can check tool credentials.
+    load_hermes_dotenv(project_env=get_project_root() / ".env")
+
     import model_tools
     from hermes_cli.config import load_config
     from hermes_cli.plugins import discover_plugins, get_plugin_manager
