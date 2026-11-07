@@ -99,6 +99,18 @@ class MailError(RuntimeError):
     """Any IMAP-level failure: connection, authentication, or a NO/BAD reply."""
 
 
+class IMAPResponseError(MailError):
+    """A completed negative response, distinct from a transport exception."""
+
+    def __init__(self, command: str, status: str, text: str):
+        super().__init__(f"{command} failed: {text or status}")
+        self.command = command
+        self.status = status
+        match = re.match(r"^\[([A-Za-z][A-Za-z0-9-]*)(?: ([^\]\r\n]+))?\](?: |$)", text)
+        self.code = match.group(1).upper() if match else None
+        self.code_arguments = (match.group(2) or "") if match else ""
+
+
 _CONNECT_ATTEMPTS = 3
 _CONNECT_RETRY_DELAY = 1.0
 _TRANSIENT_CONNECT_ERRNOS = frozenset(
@@ -623,7 +635,7 @@ class YandexIMAPClient:
         except OSError as exc:
             raise MailError(f"{what} failed: {exc}") from exc
         if typ != "OK":
-            raise MailError(f"{what} failed: {_first_text(data) or typ}")
+            raise IMAPResponseError(what, typ, _first_text(data))
         return data
 
     def _capabilities(self) -> frozenset[str]:

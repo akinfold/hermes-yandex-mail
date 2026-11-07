@@ -14,6 +14,7 @@ from hermes_yandex_mail.imap import (
     _SPECIAL_NAMES,
     DEFAULT_TIMEOUT,
     Folder,
+    IMAPResponseError,
     MailError,
     MessageSummary,
     SearchQuery,
@@ -1260,3 +1261,59 @@ def test_the_default_connection_authenticates_the_server():
     assert context.check_hostname is True
     # Without a timeout a stalled server hangs the tool call, and the agent, forever.
     assert captured["timeout"] == DEFAULT_TIMEOUT
+
+
+@pytest.mark.parametrize(
+    "text,code,arguments",
+    [
+        ("[UNAVAILABLE] backend down", "UNAVAILABLE", ""),
+        ("[unavailable] backend down", "UNAVAILABLE", ""),
+        ("[OTHER detail] refusal", "OTHER", "detail"),
+        ("prefix [UNAVAILABLE] backend down", None, ""),
+        ("[UNAVAILABLE]suffix", None, ""),
+        ("[UNAVAILABLE backend down", None, ""),
+        ("[UNAVAILABLE ] backend down", None, ""),
+        ("[UNAVAILABLE\n] backend down", None, ""),
+    ],
+)
+def test_negative_response_preserves_status_and_parses_only_leading_code(text, code, arguments):
+    client = make_client(FakeIMAP())
+    with pytest.raises(IMAPResponseError) as caught:
+        client._run("APPEND", lambda: ("NO", [text.encode()]))
+    error = caught.value
+    assert isinstance(error, MailError)
+    assert str(error) == f"APPEND failed: {text}"
+    assert (error.command, error.status, error.code, error.code_arguments) == (
+        "APPEND",
+        "NO",
+        code,
+        arguments,
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        imaplib.IMAP4.abort("[UNAVAILABLE] connection lost"),
+        imaplib.IMAP4.error("[UNAVAILABLE] protocol error"),
+        ConnectionResetError("[UNAVAILABLE] reset"),
+    ],
+)
+def test_transport_and_protocol_exceptions_are_never_completed_responses(failure):
+    client = make_client(FakeIMAP())
+    with pytest.raises(MailError) as caught:
+        client._run("APPEND", Mock(side_effect=failure))
+    assert type(caught.value) is MailError
+    assert caught.value.__cause__ is failure
+
+
+def test_production_append_does_not_retry_temporary_negative_response(fake_imap):
+    fake_imap.responses["APPEND"] = ("NO", [b"[UNAVAILABLE] backend down"])
+    with make_client(fake_imap) as client, pytest.raises(IMAPResponseError) as caught:
+        client.append("INBOX", b"frozen message")
+    assert (caught.value.command, caught.value.status, caught.value.code) == (
+        "APPEND",
+        "NO",
+        "UNAVAILABLE",
+    )
+    assert sum(call[0] == "append" for call in fake_imap.calls) == 1

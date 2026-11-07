@@ -7,12 +7,12 @@ import json
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 import yaml
 
-from hermes_yandex_mail.imap import MailError
+from hermes_yandex_mail.imap import IMAPResponseError, MailError
 
 _spec = importlib.util.spec_from_file_location(
     "live_harness", Path(__file__).parent / "e2e" / "test_live.py"
@@ -278,3 +278,77 @@ def test_cleanup_reconnects_after_observed_command_transport_failures(monkeypatc
     live._purge_everywhere("marker")
     assert built.call_count == 3
     incomplete.delete.assert_not_called()
+
+
+@pytest.mark.parametrize("fixture_name", ["planted", "samples"])
+@pytest.mark.parametrize("recover", [True, False])
+def test_fixture_append_retry_reuses_bytes_and_cleans_up(monkeypatch, fixture_name, recover):
+    client = _client()
+    failures = [IMAPResponseError("APPEND", "NO", "[UNAVAILABLE] backend down") for _ in range(3)]
+    client.append.side_effect = [*failures[:2], "8"] if recover else failures
+    _clients(monkeypatch, [client])
+    message = Mock(return_value=(b"frozen payload", "token"))
+    samples = Mock(return_value={"sample": b"frozen payload"})
+    monkeypatch.setattr(live, "_throwaway_message", message)
+    monkeypatch.setattr(live, "_sample_messages", samples)
+    purge = Mock()
+    monkeypatch.setattr(live, "_purge_everywhere", purge)
+    fixture = (
+        live.planted.__wrapped__(client, "test@example.invalid")
+        if fixture_name == "planted"
+        else live.samples.__wrapped__("test@example.invalid")
+    )
+    if recover:
+        planted = next(fixture)
+        assert "8" in planted.values()
+        purge.assert_not_called()
+        fixture.close()
+    else:
+        with pytest.raises(IMAPResponseError) as caught:
+            next(fixture)
+        assert caught.value is failures[-1]
+    assert client.append.call_count == 3
+    assert all(
+        call.args == ("INBOX", b"frozen payload") and call.kwargs == {"flags": ["\\Seen"]}
+        for call in client.append.call_args_list
+    )
+    assert live.time.sleep.call_args_list == [call(2.0), call(2.0)]
+    builder = message if fixture_name == "planted" else samples
+    builder.assert_called_once()
+    purge.assert_called_once_with(builder.call_args.args[1])
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        MailError("APPEND failed: [UNAVAILABLE] backend down"),
+        MailError("APPEND failed: socket error: EOF"),
+        IMAPResponseError("APPEND", "BAD", "[UNAVAILABLE] backend down"),
+        IMAPResponseError("APPEND", "NO", "[OVERQUOTA] mailbox full"),
+        IMAPResponseError("STORE", "NO", "[UNAVAILABLE] backend down"),
+        IMAPResponseError("APPEND", "NO", "refused: [UNAVAILABLE] backend down"),
+        IMAPResponseError("APPEND", "NO", "[UNAVAILABLE extra] backend down"),
+        IMAPResponseError("APPEND", "NO", "[UNAVAILABLE]suffix"),
+        IMAPResponseError("APPEND", "NO", "[UNAVAILABLEX] backend down"),
+        IMAPResponseError("APPEND", "NO", "[UNAVAILABLE backend down"),
+    ],
+)
+@pytest.mark.parametrize("fixture_name", ["planted", "samples"])
+def test_fixture_append_refuses_other_failures_and_cleans_up(monkeypatch, error, fixture_name):
+    client = _client()
+    client.append.side_effect = error
+    _clients(monkeypatch, [client])
+    monkeypatch.setattr(live, "_sample_messages", lambda *_: {"sample": b"frozen payload"})
+    purge = Mock()
+    monkeypatch.setattr(live, "_purge_everywhere", purge)
+    fixture = (
+        live.planted.__wrapped__(client, "test@example.invalid")
+        if fixture_name == "planted"
+        else live.samples.__wrapped__("test@example.invalid")
+    )
+    with pytest.raises(MailError) as caught:
+        next(fixture)
+    assert caught.value is error
+    client.append.assert_called_once()
+    live.time.sleep.assert_not_called()
+    purge.assert_called_once()

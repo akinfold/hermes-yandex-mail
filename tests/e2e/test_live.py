@@ -28,6 +28,7 @@ import pytest
 
 from hermes_yandex_mail import config, tool
 from hermes_yandex_mail.imap import (
+    IMAPResponseError,
     MailError,
     SearchQuery,
     YandexIMAPClient,
@@ -155,13 +156,34 @@ def _throwaway_message(account: str, marker: str) -> tuple[bytes, str]:
     return message.as_bytes(), token
 
 
+_APPEND_ATTEMPTS = 3
+_APPEND_RETRY_DELAY = 2.0
+
+
+def _append_fixture(client: YandexIMAPClient, raw: bytes) -> str | None:
+    """Retry only an explicit temporary refusal that guarantees no append."""
+    for attempt in range(_APPEND_ATTEMPTS):
+        try:
+            return client.append("INBOX", raw, flags=["\\Seen"])
+        except IMAPResponseError as exc:
+            if (exc.command, exc.status, exc.code, exc.code_arguments) != (
+                "APPEND",
+                "NO",
+                "UNAVAILABLE",
+                "",
+            ) or attempt + 1 >= _APPEND_ATTEMPTS:
+                raise
+            time.sleep(_APPEND_RETRY_DELAY)
+    raise AssertionError("APPEND attempts exhausted without a result")  # pragma: no cover
+
+
 @pytest.fixture
 def planted(client, account):
     """Upload a throwaway message and guarantee it is gone afterwards."""
     marker = uuid.uuid4().hex[:12]
     raw, token = _throwaway_message(account, marker)
     try:
-        uid = client.append("INBOX", raw, flags=["\\Seen"])
+        uid = _append_fixture(client, raw)
         assert uid, "APPEND did not return an APPENDUID; the server may lack UIDPLUS"
         yield {"uid": uid, "folder": "INBOX", "marker": marker, "token": token}
     finally:
@@ -377,7 +399,7 @@ def samples(account):
     try:
         with _connected_client() as live:
             for name, raw in _sample_messages(account, marker).items():
-                uids[name] = live.append("INBOX", raw, flags=["\\Seen"])
+                uids[name] = _append_fixture(live, raw)
         yield uids
     finally:
         _purge_everywhere(marker)

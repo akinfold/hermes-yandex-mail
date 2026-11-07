@@ -633,8 +633,14 @@ errors, before any caller operation runs. The live suite also makes up to three
 attempts for read-only handler transport failures after connection establishment;
 it does not repeat an exhausted connection retry sequence.
 Cleanup reconnects and rescans after a transport failure, requires two complete
-empty scans, and fails if it cannot verify removal. Sends and other test writes
-are not retried.
+empty scans, and fails if it cannot verify removal. Fixture APPENDs make up to
+three attempts, two seconds apart, only after a completed `NO [UNAVAILABLE]`
+response. Each attempt uses the same message bytes and marker: unsuccessful
+APPENDs must leave the mailbox unchanged ([RFC 3501 §6.3.11](https://www.rfc-editor.org/rfc/rfc3501#section-6.3.11)),
+and `UNAVAILABLE` denotes a temporary backend failure
+([RFC 5530 §3](https://www.rfc-editor.org/rfc/rfc5530#section-3)). Transport failures,
+other APPEND responses, sends, and other test writes are not retried. Production
+APPEND remains a single attempt.
 
 ### Locally
 
