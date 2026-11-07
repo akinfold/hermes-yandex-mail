@@ -70,6 +70,9 @@ jobs:
           echo "E2E_PYTHON=$(command -v python)" >> "$GITHUB_ENV"
       - name: Run live E2E tests
         env:
+          # Yandex recommends this host for connections outside Russia:
+          # https://yandex.ru/support/yandex-360/customers/mail/ru/mail-clients/mail-clients-troubleshooting
+          YANDEX_MAIL_IMAP_HOST: imap.ya.ru
           YANDEX_MAIL_LOGIN: ${{ secrets.YANDEX_MAIL_LOGIN }}
           YANDEX_MAIL_APP_PASSWORD: ${{ secrets.YANDEX_MAIL_APP_PASSWORD }}
         run: >-

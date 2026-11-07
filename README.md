@@ -628,7 +628,8 @@ so the plugin's own fence refuses anything else before a socket opens, and the
 test process asserts the same thing again before each call. Use a dedicated test
 mailbox regardless.
 
-Read-only handlers make up to three attempts after transient transport errors.
+Read-only handlers and initial client connections make up to three attempts after
+transient transport errors. Connection recovery finishes before any test write.
 Cleanup reconnects and rescans after a transport failure, requires two complete
 empty scans, and fails if it cannot verify removal. Sends and other test writes
 are not retried.
@@ -658,6 +659,8 @@ its official installer: the latest Hermes release by default, and its
 tests run in Hermes' own Python, with this checkout on its path rather than
 installed into Hermes' environment, and the run fails outright if the plugin
 cannot import Hermes, rather than testing the plugin's stand-ins instead.
+The hosted runner uses `imap.ya.ru`, following [Yandex's recommendation for
+connections outside Russia](https://yandex.ru/support/yandex-360/customers/mail/ru/mail-clients/mail-clients-troubleshooting).
 
 ## Checking the install paths
 

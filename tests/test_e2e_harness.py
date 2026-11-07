@@ -44,6 +44,8 @@ def test_read_only_transport_retry_is_bounded(monkeypatch, name):
     [
         "Cannot reach imap.yandex.ru:993: command: CAPABILITY => problems with connection",
         "Login failed: problems with connection",
+        "Selecting Outbox failed: command: EXAMINE => problems with connection",
+        "SEARCH failed: command: UID => problems with connection",
         "Cannot reach imap.yandex.ru:993: _ssl.c:989: The handshake operation timed out",
     ],
 )
@@ -67,6 +69,8 @@ def test_read_only_retry_returns_recovered_payload(monkeypatch):
         "Cannot reach host: CERTIFICATE_VERIFY_FAILED",
         "SELECT failed: Permission denied",
         "FETCH failed: malformed response",
+        "SEARCH failed: command: UID => BAD invalid search criteria",
+        "Selecting Outbox failed: command: EXAMINE => Permission denied",
         "message not found",
     ],
 )
@@ -194,3 +198,113 @@ def test_live_workflow_serializes_all_refs_without_canceling_cleanup():
         "group": "yandex-mail-e2e-account",
         "cancel-in-progress": False,
     }
+
+
+def test_connection_entry_transport_failure_recovers_before_body(monkeypatch):
+    ready = _client()
+    built = _clients(
+        monkeypatch, [MailError("command: CAPABILITY => problems with connection"), ready]
+    )
+    with live._connected_client() as client:
+        client.append("INBOX", b"sample")
+    assert built.call_count == 2
+    ready.connect.assert_called_once()
+    ready.append.assert_called_once_with("INBOX", b"sample")
+
+
+def test_lazy_connection_transport_failure_closes_before_retry(monkeypatch):
+    failed, ready = _client(), _client()
+    failed.connect.side_effect = MailError("command: CAPABILITY => problems with connection")
+    closed = []
+    clients = iter([failed, ready])
+
+    @contextmanager
+    def build():
+        client = next(clients)
+        try:
+            yield client
+        finally:
+            closed.append(client)
+
+    monkeypatch.setattr(live.config, "build_client", build)
+    with live._connected_client() as client:
+        assert client is ready
+        assert closed == [failed]
+        client.append("INBOX", b"sample")
+    assert closed == [failed, ready]
+    failed.append.assert_not_called()
+    ready.append.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        MailError("command: CAPABILITY => problems with connection"),
+        MailError("network is unreachable"),
+    ],
+)
+def test_initial_connection_recovery_is_bounded(monkeypatch, error):
+    built = _clients(monkeypatch, [error, error, error])
+    with pytest.raises(MailError), live._connected_client():
+        pytest.fail("an unconnected client reached the test body")
+    assert built.call_count == 3
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        MailError("Authentication failed: invalid credentials"),
+        MailError("Cannot reach host: CERTIFICATE_VERIFY_FAILED"),
+        ValueError("invalid configuration"),
+    ],
+)
+def test_initial_connection_nontransport_failure_is_not_retried(monkeypatch, error):
+    built = _clients(monkeypatch, [error])
+    with pytest.raises(type(error)), live._connected_client():
+        pytest.fail("an unconnected client reached the test body")
+    assert built.call_count == 1
+
+
+@pytest.mark.parametrize("operation", ["append", "send", "store_flags", "move", "delete"])
+def test_connection_recovery_never_replays_caller_write(monkeypatch, operation):
+    client = _client()
+    getattr(client, operation).side_effect = MailError("command: UID => problems with connection")
+    built = _clients(monkeypatch, [client])
+    with pytest.raises(MailError), live._connected_client() as connected:
+        getattr(connected, operation)("write")
+    assert built.call_count == 1
+    getattr(client, operation).assert_called_once_with("write")
+
+
+def test_samples_retry_connection_without_replaying_an_append(monkeypatch):
+    client = _client()
+    client.append.side_effect = ["8", MailError("command: APPEND => problems with connection")]
+    built = _clients(
+        monkeypatch, [MailError("command: CAPABILITY => problems with connection"), client]
+    )
+    monkeypatch.setattr(
+        live, "_sample_messages", lambda *_: {"first": b"first", "second": b"second"}
+    )
+    purge = Mock()
+    monkeypatch.setattr(live, "_purge_everywhere", purge)
+    fixture = live.samples.__wrapped__("test@example.invalid")
+    with pytest.raises(MailError):
+        next(fixture)
+    assert built.call_count == 2
+    assert client.append.call_count == 2
+    purge.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "Selecting Outbox failed: command: EXAMINE => problems with connection",
+        "SEARCH failed: command: UID => problems with connection",
+    ],
+)
+def test_cleanup_reconnects_after_observed_command_transport_failures(monkeypatch, error):
+    incomplete, empty = _client(search_error=MailError(error)), _client()
+    built = _clients(monkeypatch, [incomplete, empty, empty])
+    live._purge_everywhere("marker")
+    assert built.call_count == 3
+    incomplete.delete.assert_not_called()

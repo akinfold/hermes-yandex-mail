@@ -19,6 +19,7 @@ import re
 import stat
 import time
 import uuid
+from contextlib import ExitStack, contextmanager
 from email.message import EmailMessage
 from email.utils import make_msgid
 from pathlib import Path
@@ -53,7 +54,7 @@ _TRANSPORT_ERROR = re.compile(
     r"no route to host|connection timed out|connection refused|"
     r"socket error: (?:eof|\[errno (?:32|54|60|61|65|101|104|110|111|113)\])|"
     r"server not connected|broken pipe|the handshake operation timed out|"
-    r"command: CAPABILITY => problems with connection|Login failed: problems with connection",
+    r"command: [A-Z]+ => problems with connection|Login failed: problems with connection",
     re.IGNORECASE,
 )
 _TRANSPORT_ATTEMPTS = 3
@@ -62,6 +63,31 @@ _TRANSPORT_POLL = 2.0
 
 def _transport_failure(error: object) -> bool:
     return bool(_TRANSPORT_ERROR.search(str(error)))
+
+
+@contextmanager
+def _connected_client():
+    """Retry connection establishment before handing the client to its caller."""
+    for attempt in range(_TRANSPORT_ATTEMPTS):
+        stack = ExitStack()
+        try:
+            live = stack.enter_context(config.build_client())
+            # The client is lazy: __enter__ alone does not open its connection.
+            live.connect()
+        except BaseException as exc:
+            stack.close()
+            if (
+                not isinstance(exc, (MailError, OSError))
+                or not _transport_failure(exc)
+                or attempt + 1 >= _TRANSPORT_ATTEMPTS
+            ):
+                raise
+            time.sleep(_TRANSPORT_POLL)
+        else:
+            break
+    # The caller's body is outside the retry scope, including every write.
+    with stack:
+        yield live
 
 
 def _read_only_handler(name: str, args: dict) -> dict:
@@ -113,7 +139,7 @@ def account() -> str:
 @pytest.fixture
 def client():
     _credentials()
-    with config.build_client() as live:
+    with _connected_client() as live:
         yield live
 
 
@@ -359,7 +385,7 @@ def samples(account):
     marker = uuid.uuid4().hex[:12]
     uids: dict[str, str] = {}
     try:
-        with config.build_client() as live:
+        with _connected_client() as live:
             for name, raw in _sample_messages(account, marker).items():
                 uids[name] = live.append("INBOX", raw, flags=["\\Seen"])
         yield uids
@@ -521,7 +547,7 @@ def test_sending_to_self_arrives_and_is_filed_in_sent(account, sending):
         assert result["notes"] == [], result
 
         sent_folder = result["sent_folder"]
-        with config.build_client() as reader:
+        with _connected_client() as reader:
             filed = _await_search(reader, sent_folder, marker, expect_found=True)
             assert filed, f"no copy of the message in {sent_folder}"
             delivered = _wait_for_delivery(reader, "INBOX", marker)
@@ -552,7 +578,7 @@ def test_a_reply_threads_onto_the_message_it_answers(client, account, planted, s
         assert result["recipient_sources"] == {account: "self"}, result
         assert result["marked_answered"] is True, result
 
-        with config.build_client() as reader:
+        with _connected_client() as reader:
             answered = reader.summary("INBOX", planted["uid"])
             assert answered is not None and answered.answered, answered.flags
             delivered = _wait_for_delivery(reader, "INBOX", marker)
