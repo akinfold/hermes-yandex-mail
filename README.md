@@ -8,7 +8,7 @@
 [![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/akinfold/hermes-yandex-mail/badges/coverage.json&v=1)](https://github.com/akinfold/hermes-yandex-mail/actions/workflows/ci.yml)
 [![CodeFactor](https://www.codefactor.io/repository/github/akinfold/hermes-yandex-mail/badge)](https://www.codefactor.io/repository/github/akinfold/hermes-yandex-mail)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/akinfold/hermes-yandex-mail/blob/main/LICENSE)
 
 [Quick start](#quick-start) · [Features](#the-tools) · [Configuration](#configuration) · [Installation](#installing-the-plugin-into-hermes) · [Security](#security)
 
@@ -777,13 +777,13 @@ Found with thanks by [@ukko](https://github.com/ukko) in
 [#2](https://github.com/akinfold/hermes-yandex-mail/pull/2).
 
 Please report security issues privately rather than as a public issue — see
-[CONTRIBUTING.md](CONTRIBUTING.md).
+[CONTRIBUTING.md](https://github.com/akinfold/hermes-yandex-mail/blob/main/CONTRIBUTING.md).
 
 ## Contributing
 
-Issues and PRs are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the
+Issues and PRs are welcome — see [CONTRIBUTING.md](https://github.com/akinfold/hermes-yandex-mail/blob/main/CONTRIBUTING.md) for the
 layout, the plugin contract rules worth knowing, and the release process.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](https://github.com/akinfold/hermes-yandex-mail/blob/main/LICENSE).
