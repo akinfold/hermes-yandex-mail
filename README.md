@@ -10,7 +10,7 @@
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/akinfold/hermes-yandex-mail/blob/main/LICENSE)
 
-[Quick start](#quick-start) · [Features](#the-tools) · [Configuration](#configuration) · [Installation](#installing-the-plugin-into-hermes) · [Security](#security)
+[Quick start](https://github.com/akinfold/hermes-yandex-mail/blob/main/README.md#quick-start) · [Features](https://github.com/akinfold/hermes-yandex-mail/blob/main/README.md#the-tools) · [Configuration](https://github.com/akinfold/hermes-yandex-mail/blob/main/README.md#configuration) · [Installation](https://github.com/akinfold/hermes-yandex-mail/blob/main/README.md#installing-the-plugin-into-hermes) · [Security](https://github.com/akinfold/hermes-yandex-mail/blob/main/README.md#security)
 
 **Let your [Hermes Agent](https://hermes-agent.nousresearch.com) work through your
 Yandex inbox.** *"What came in overnight?"* — *"Read me the one from the bank."* —
@@ -67,13 +67,13 @@ plugins:
 ```
 
 **Before the first run, switch IMAP on for the mailbox** — see
-[Enabling IMAP](#enabling-imap-in-yandex-mail). Yandex refuses to log in
+[Enabling IMAP](https://github.com/akinfold/hermes-yandex-mail/blob/main/README.md#enabling-imap-in-yandex-mail). Yandex refuses to log in
 otherwise, and the error looks exactly like a wrong password.
 
 That's it. Ask the agent *"anything unread in my inbox?"* and it will tell you.
 
 > Not ready to hand over write access? Add `YANDEX_MAIL_ACTIONS=read` and it can
-> only look — see [Restricting what the agent can do](#restricting-what-the-agent-can-do).
+> only look — see [Restricting what the agent can do](https://github.com/akinfold/hermes-yandex-mail/blob/main/README.md#restricting-what-the-agent-can-do).
 
 ## The tools
 
@@ -107,8 +107,8 @@ Folder names are matched generously on the way in — `spam`, `Spam`, `junk` and
 case-sensitive and would simply answer *"No such folder"*.
 
 Sending goes over **SMTP** (`smtp.yandex.ru:465`) with the same app password, and
-is off unless you switch it on — see [Sending mail](#sending-mail). So is saving
-attachments — see [Saving attachments](#saving-attachments).
+is off unless you switch it on — see [Sending mail](https://github.com/akinfold/hermes-yandex-mail/blob/main/README.md#sending-mail). So is saving
+attachments — see [Saving attachments](https://github.com/akinfold/hermes-yandex-mail/blob/main/README.md#saving-attachments).
 
 ### Reading long messages
 
@@ -130,7 +130,7 @@ without. The plain-text body is preferred over an HTML one, and the text of a
 forwarded message is part of the body. Attachments are listed with a `part_id`,
 name, MIME type, and a `size` estimated from their encoded size on the server,
 which can be off by a few bytes. To get one as a file, see
-[Saving attachments](#saving-attachments).
+[Saving attachments](https://github.com/akinfold/hermes-yandex-mail/blob/main/README.md#saving-attachments).
 
 Paging keeps no copy of your mail: every page decodes the text from its
 beginning again, so a deep page of a very long message costs more time and
@@ -466,12 +466,12 @@ is off, or the app password lacks the Mail scope.
 - **Reading is paged.** Only the text parts are fetched, never the attachments.
   Continue with `next_offset` to read beyond the page limit; a large attachment
   does not force a whole-message download. See
-  [Reading long messages](#reading-long-messages).
+  [Reading long messages](https://github.com/akinfold/hermes-yandex-mail/blob/main/README.md#reading-long-messages).
 - **The TLS certificate and hostname are verified**, and every connection
   carries a 30-second timeout. A private or self-signed CA is supplied the
   standard way, via `SSL_CERT_FILE` / `SSL_CERT_DIR`; there is no setting for
   turning verification off. *(Releases 0.1.0 and 0.2.0 did not verify — see
-  [Security](#security).)*
+  [Security](https://github.com/akinfold/hermes-yandex-mail/blob/main/README.md#security).)*
 - **Yandex' SMTP does not advertise `SMTPUTF8`,** so an address with non-ASCII
   characters in it cannot be sent to at all. It is refused with a sentence
   saying why, rather than failing somewhere inside the standard library.
@@ -540,7 +540,7 @@ install now: it brings the tools back and keeps your credentials in
 at all — the `pip` on your `PATH` belongs to some other Python.
 
 Nothing asks for credentials on this path — add them to `~/.hermes/.env` as in
-the [Quick start](#quick-start).
+the [Quick start](https://github.com/akinfold/hermes-yandex-mail/blob/main/README.md#quick-start).
 
 ### Option C — drop-in directory
 
@@ -606,7 +606,7 @@ checked before every release by installing the build into a real Hermes exactly
 as written here: Hermes v2026.9.24, the latest release, and `main`, each set up
 by its own official installer. The Option B install is checked against Hermes
 v2026.9.24, the last release whose installer builds the older layout. See
-[Checking the install paths](#checking-the-install-paths).
+[Checking the install paths](https://github.com/akinfold/hermes-yandex-mail/blob/main/README.md#checking-the-install-paths).
 
 ## Development
 
@@ -680,7 +680,7 @@ connections outside Russia](https://yandex.ru/support/yandex-360/customers/mail/
 
 The `install`-marked tests in `tests/install/` install the built plugin into a
 real Hermes, set up by its official installer, by each option in
-[Installing the plugin into Hermes](#installing-the-plugin-into-hermes) — running
+[Installing the plugin into Hermes](https://github.com/akinfold/hermes-yandex-mail/blob/main/README.md#installing-the-plugin-into-hermes) — running
 the README's own commands, upgrades included — and then ask Hermes what it
 loaded: the plugin must be listed as enabled, load without error, and give the
 agent its tools. They also check that installing from the repository root still
@@ -768,7 +768,7 @@ restart within the intended profile if Hermes cannot determine permissions.
 anyone positioned to intercept it — a hostile Wi-Fi network, a spoofed DNS
 answer, an intercepting proxy — could present their own certificate and read
 the app password and every message. **0.2.1 fixes this; upgrade** — see
-[Upgrading](#upgrading).
+[Upgrading](https://github.com/akinfold/hermes-yandex-mail/blob/main/README.md#upgrading).
 
 If you ran an earlier version over a network you do not control, revoke the app
 password at <https://id.yandex.ru/security/app-passwords> and issue a new one.
