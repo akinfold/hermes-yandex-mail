@@ -321,6 +321,12 @@ def test_git_install_asks_for_credentials_loads_and_upgrades(home: Home) -> None
     assert home.credentials() == PROMPT_ANSWERS
     _assert_loaded(home, source="user")
 
+    if os.environ.get("INSTALL_CHECK_CHANNEL") in {"release", "main"}:
+        settings = home.run(f"hermes plugins config {PLUGIN}")
+        for name in REQUIRED_ENV:
+            assert f"{name}:" in settings, settings
+        assert PROMPT_ANSWERS["YANDEX_MAIL_APP_PASSWORD"] not in settings
+
     # README.md's upgrade: the same command with --force. The credentials are
     # already there, so nothing is asked again.
     _make_stale(home)
