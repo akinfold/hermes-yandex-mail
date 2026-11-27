@@ -153,9 +153,10 @@ change; another profile's values are never used as a fallback. Hermes loads
 the profile's `.env` file itself. Outside Hermes, only the process environment
 is read. Secret values are never logged.
 
-On Hermes 0.23.4 or later, run `hermes plugins config yandex_mail` in a terminal
-to update your email address and Mail app password. Hermes saves these values in the
-active profile's `.env` file.
+On Hermes 0.23.4 or later, if you installed the plugin with `hermes plugins install`
+or copied it into the plugins directory, run `hermes plugins config yandex_mail`
+in a terminal to update your email address and Mail app password. Hermes saves the
+values in the active profile's `.env` file. For PyPI installs, edit that file directly.
 
 Dates are ISO 8601 (`2026-07-25`). Folder names may be in any language — the
 Cyrillic names Yandex gives Russian accounts (`Отправленные`, `Спам`) are encoded
